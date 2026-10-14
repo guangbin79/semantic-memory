@@ -1,127 +1,160 @@
 # semantic-memory-mcp
 
-coding agent 上下文管理的**侧车（sidecar）**：提供**模型语义级**的上下文检索，
-确保上下文相关性不丢失。
+**[English](README.md) | [中文](README.zh-CN.md)**
 
-**它的目标不是节省 token、不是压缩上下文。** opencode v2 原生 compaction 和 DCP
-负责上下文"数量"（压缩、修剪、丢弃以适配窗口）；本组件负责上下文"相关性"——
-被压缩掉的、被剪掉的、上一个会话里的一切，都进入语义可检索的仓库，当它与
-**当前任务**相关时被自动找回注入。它花一笔受预算约束的 token（注入块），
-买回本会永久丢失的相关性。压缩让窗口够用，侧车让压缩安全。
+A **sidecar** for coding-agent context management: **model-semantic-level** context
+retrieval that keeps context relevance alive.
 
-- MCP 服务（Python FastMCP）：BM25（FTS5 双通道 porter + trigram）+ 向量（Qwen3-Embedding-0.6B GGUF，可选）+ RRF 融合——检索发生在嵌入空间，措辞不同也能命中
-- v2 插件（`opencode-plugin/memory.ts`）：钩住 context / compaction / generate / chat.message / tool execute.after，让"记"和"忆"自动发生
-- 独立进程、独立模型：不占用主 agent 的窗口与模型，服务宕机会话无感（fail-open）
+**Its goal is not saving tokens or compressing context.** opencode v2's native
+compaction and DCP manage context *quantity* (compress, prune, discard to fit the
+window); this component manages context *relevance* — everything that gets
+compressed away, pruned, or left behind in a previous session lands in a
+semantically searchable store, and is automatically recalled and injected when it
+becomes relevant to the **current task**. It spends a small, budgeted amount of
+tokens (the injection block) to buy back relevance that would otherwise be lost
+forever. Compaction makes the window fit; the sidecar makes compression safe.
 
-## 架构
+- MCP server (Python FastMCP): BM25 (dual-channel FTS5: porter + trigram) + vectors
+  (Qwen3-Embedding-0.6B GGUF, optional) + RRF fusion — retrieval happens in
+  embedding space, so differently-phrased memories still match
+- opencode v2 plugin (`opencode-plugin/memory.ts`): hooks into
+  context / compaction / generate / chat.message / tool execute.after, making
+  remembering and recalling automatic
+- Separate process, separate model: never touches the main agent's window or
+  model; if the service is down the session is unaffected (fail-open)
+
+## Architecture
 
 ```
-┌─ opencode v2 插件（memory.ts，零依赖，fail-open）────────┐
-│  context/compaction/generate → /recall → 尾部注入         │
-│  compaction 前 → /ingest（压缩丢弃 ≠ 记忆永存）            │
-│  chat.message "记住…" → /ingest                          │
-│  tool execute.after（白名单）→ /ingest                    │
-└──────────────────────┬────────────────────────────────────┘
-                       │ HTTP 127.0.0.1:8765（Bearer token 可选）
-┌──────────────────────▼────────────────────────────────────┐
-│  memory-mcp 服务（单进程双接口）                            │
-│  MCP /mcp：memory_store / recall / forget / list / stats  │
-│  REST 侧车：/recall /ingest /health（插件专用）            │
-│  SQLite + FTS5(porter|trigram) + 向量BLOB，RRF(k=60)      │
-└───────────────────────────────────────────────────────────┘
+┌─ opencode v2 plugin (memory.ts, zero deps, fail-open) ───┐
+│  context/compaction/generate → /recall → tail injection  │
+│  pre-compaction → /ingest (discarded ≠ lost)             │
+│  chat.message "remember ..." → /ingest                   │
+│  tool execute.after (whitelist) → /ingest                │
+└──────────────────────┬───────────────────────────────────┘
+                       │ HTTP 127.0.0.1:8765 (optional Bearer token)
+┌──────────────────────▼───────────────────────────────────┐
+│  memory-mcp service (single process, dual interface)     │
+│  MCP /mcp: memory_store / recall / forget / list / stats │
+│  REST sidecar: /recall /ingest /health (for plugins)     │
+│  SQLite + FTS5(porter|trigram) + vector BLOBs, RRF(k=60) │
+└──────────────────────────────────────────────────────────┘
 ```
 
-设计约束：插件零智能（检索/嵌入/存储全在服务端）；服务挂了插件静默跳过；注入集合未变不重复注入（保护 prefix cache）；MCP 脱离插件独立可用。
-度量标准不是"省了多少 token"，而是"当前任务所需相关性的召回率"（recall@k）。
+The REST sidecar exists for **multi-harness support**: any agent harness with
+lifecycle hooks (Claude Code, Codex, Kimi Code, …) can wire the control plane as
+"hook event → curl localhost:8765" — only opencode v2 needs an in-process plugin,
+because its hooks live inside the JS runtime. See `adapters/` for per-harness
+integrations (planned).
 
-## 快速开始
+Design constraints: the plugin holds zero intelligence (retrieval, embedding and
+storage all live in the service); a dead service means silent skips, never a
+blocked session; no re-injection when the recalled set is unchanged (protects the
+prefix cache); the MCP server is fully usable without the plugin. The metric that
+matters is not "tokens saved" but **recall@k of task-relevant context**.
+
+## Quick start
 
 ```bash
-# 1. 安装服务（建议 uv 或 venv）
-pip install -e .                # 纯 BM25 模式即可用
-pip install -e ".[embed]"       # 需要向量通道时（编译 llama-cpp-python）
+# 1. Install the service (uv or venv recommended)
+pip install -e .                # BM25-only mode works out of the box
+pip install -e ".[embed]"       # add the vector channel (builds llama-cpp-python)
 
-# 2.（可选）下载嵌入模型，启用向量通道
-bash scripts/download_model.sh  # 输出 MEMORY_MODEL_PATH 导出语句
+# 2. (Optional) download the embedding model to enable the vector channel
+bash scripts/download_model.sh  # prints the MEMORY_MODEL_PATH export line
 
-# 3. 启动服务（HTTP 模式，MCP 与 REST 同端口）
+# 3. Start the service (HTTP mode: MCP and REST share one port)
 memory-mcp                      # http://127.0.0.1:8765/mcp
-memory-mcp --stdio              # stdio 模式（仅 MCP 工具，无 REST 侧车）
+memory-mcp --stdio              # stdio mode (MCP tools only, no REST sidecar)
 
-# 4. opencode v2：注册 MCP 服务器（~/.config/opencode/opencode.jsonc）
+# 4. Register the MCP server in opencode v2 (~/.config/opencode/opencode.jsonc)
 {
   "mcp": { "servers": {
     "memory": { "type": "remote", "url": "http://127.0.0.1:8765/mcp" }
   } }
 }
 
-# 5. opencode v2：安装控制面插件
+# 5. Install the control-plane plugin
 cp opencode-plugin/memory.ts ~/.config/opencode/plugins/
-# 插件目录的 package.json 需有 @opencode/plugin（仅类型）：
+# the plugin directory needs @opencode/plugin (types only):
 #   cd ~/.config/opencode && npm install @opencode/plugin@beta
 ```
 
-## 配置（环境变量）
+## Configuration (environment variables)
 
-服务端：
+Service:
 
-| 变量 | 默认 | 说明 |
+| Variable | Default | Description |
 |---|---|---|
-| `MEMORY_DB_PATH` | `~/.local/share/memory-mcp/memory.db` | 数据库路径 |
-| `MEMORY_MODEL_PATH` | 空 | GGUF 模型路径；空 = 纯 BM25 降级 |
-| `MEMORY_DEVICE` | `cuda` | 嵌入设备：`cuda`（默认，失败自动回退 CPU）/ `cpu` |
-| `MEMORY_HOST` / `MEMORY_PORT` | `127.0.0.1` / `8765` | 绑定地址 |
-| `MEMORY_TOKEN` | 空 | REST 侧车 Bearer 鉴权；绑非回环地址时**必配** |
-| `MEMORY_RRF_K` | `60` | RRF 融合常数 |
+| `MEMORY_DB_PATH` | `~/.local/share/memory-mcp/memory.db` | Database path |
+| `MEMORY_MODEL_PATH` | empty | GGUF model path; empty = BM25-only fallback |
+| `MEMORY_DEVICE` | `cuda` | Embed device: `cuda` (default, auto-falls back to CPU) / `cpu` |
+| `MEMORY_HOST` / `MEMORY_PORT` | `127.0.0.1` / `8765` | Bind address |
+| `MEMORY_TOKEN` | empty | REST sidecar Bearer auth; **required** when binding non-loopback |
+| `MEMORY_RRF_K` | `60` | RRF fusion constant |
 
-插件：
+Plugin:
 
-| 变量 | 默认 | 说明 |
+| Variable | Default | Description |
 |---|---|---|
-| `MEMORY_PLUGIN_URL` | `http://127.0.0.1:8765` | 服务地址 |
-| `MEMORY_PLUGIN_TOKEN` | 空 | 与服务端 `MEMORY_TOKEN` 对应 |
-| `MEMORY_PLUGIN_LIMIT` | `5` | 每次召回条数 |
-| `MEMORY_PLUGIN_BUDGET_CHARS` | `2000` | 注入块字符预算 |
-| `MEMORY_PLUGIN_TOOL_CAPTURE` | 空 | 工具捕获白名单（逗号分隔），如 `gis,bash` |
-| `MEMORY_PLUGIN_AUTOSTART` | `0` | `=1` 时服务未启动则自动 spawn |
+| `MEMORY_PLUGIN_URL` | `http://127.0.0.1:8765` | Service URL |
+| `MEMORY_PLUGIN_TOKEN` | empty | Matches the service-side `MEMORY_TOKEN` |
+| `MEMORY_PLUGIN_LIMIT` | `5` | Recalled items per injection |
+| `MEMORY_PLUGIN_BUDGET_CHARS` | `2000` | Injection block character budget |
+| `MEMORY_PLUGIN_TOOL_CAPTURE` | empty | Tool capture whitelist (comma-separated), e.g. `gis,bash` |
+| `MEMORY_PLUGIN_AUTOSTART` | `0` | `=1` spawns the service if unreachable |
 
-## 向量通道（与 ctx-semantic 同源）
+## Vector channel (same vectors as ctx-semantic)
 
-嵌入层逐项对齐 [ctx-semantic](https://github.com/guangbin79/ctx-semantic) 的向量与方式，
-同一模型产出同一向量（llama-cpp-python 也锁定同一版本 0.3.35）：
+The embedding layer mirrors [ctx-semantic](https://github.com/guangbin79/ctx-semantic)
+item by item — same model file, same llama-cpp-python pin (0.3.35), same output:
 
-- 模型：Qwen3-Embedding-0.6B **Q8_0** GGUF，dim 1024，pooling **LAST**（显式指定）
-- 非对称嵌入：**查询侧**自动加 `Instruct: ...\nQuery: {text}` 前缀，**文档侧**原文
-- n_ctx=8192，批大小 32 子批，float32 行 L2 归一化（1e-12 保护）
-- 向量检索：暴力余弦（~50k 条内亚毫秒，无需 ANN）
+- Model: Qwen3-Embedding-0.6B **Q8_0** GGUF, dim 1024, pooling **LAST** (explicit)
+- Asymmetric embedding: **queries** get an `Instruct: ...\nQuery: {text}` prefix,
+  **documents** are embedded raw
+- n_ctx=8192, sub-batches of 32, float32 rows L2-normalized (1e-12 guard)
+- Vector search: brute-force cosine (sub-millisecond up to ~50k entries, no ANN needed)
 
-**设备策略（本项目规格，与 ctx-semantic 相反）**：`MEMORY_DEVICE=cuda` 为**默认**，
-`cpu` 可选。GPU 路径带确定性回退：模型加载 → 探针嵌入 → **nvidia-smi PID 验证**
-（识别"声称 GPU 实际 CPU"的静默回退）→ 任何失败重建于 CPU 并记日志；
-GPU 运行期嵌入失败（如 OOM）自动 CPU 重建重试一次。无 NVIDIA 环境设
-`MEMORY_DEVICE=cpu` 可跳过 GPU 尝试。`memory_stats` / `/health` 返回实际运行设备。
+**Device policy (deliberately inverted vs. ctx-semantic)**: `MEMORY_DEVICE=cuda` is the
+**default**, `cpu` is opt-in. The GPU path falls back deterministically: load → probe
+embed → **nvidia-smi PID verification** (detects silent CPU fallback) → any failure
+rebuilds on CPU with a log line; a runtime GPU embed failure (e.g. OOM) rebuilds on
+CPU and retries once. On machines without NVIDIA, set `MEMORY_DEVICE=cpu` to skip the
+GPU attempt. `memory_stats` / `/health` report the actual device in use.
 
-## 中文检索说明
+## Multilingual full-text search
 
-FTS5 的 porter 分词会把连续中文塌缩成单个 token，因此本库为 content 额外维护
-**trigram 通道**（≥3 字符子串可匹配，与 ctx-semantic 同思路）。两通道结果按
-BM25 最优 rank 合并后进入 RRF。向量通道在嵌入模型缺失时自动关闭，不报错。
+- The **porter** channel (unicode61 + English stemming) indexes every script with
+  word boundaries: English, French, German, Spanish, Russian, Greek, Arabic, …
+- The **trigram** channel (≥3-char substrings) covers scripts without word
+  boundaries: Chinese, Japanese, Korean, Thai, Lao, Khmer, Burmese — and provides
+  substring fallback for any language (even German compounds).
 
-## 测试
+Known gap: 2-character CJK words (e.g. 坐标, 投影) fall below the trigram minimum.
+The vector channel backstops this (Qwen3-Embedding is multilingual, 100+ languages);
+if BM25-only mode ever shows a real miss, the fix is an application-level bigram
+channel (~15 lines, zero dependencies) — see the roadmap.
+
+## Testing
 
 ```bash
 pip install -e ".[dev]"
-pytest            # 7 项：存储/双通道召回/软删除/RRF 数学/CJK 子串/容错
+pytest            # 8 tests: store / dual-channel recall / soft delete / RRF math /
+                  # CJK substring / query-prefix contract / fault tolerance
 ```
 
-## 分期路线
+## Roadmap
 
-- [x] 第一期：MCP 工具 + 混合检索 + REST 侧车（本仓库当前状态）
-- [x] 第二期：v2 插件四钩子（注入 / 压缩落库 / 显式记忆 / 工具白名单）
-- [ ] 第三期：chat.message 语义级自动捕获（分类模型）、跨项目记忆图谱
+- [x] Phase 1: MCP tools + hybrid retrieval + REST sidecar (current state)
+- [x] Phase 2: opencode v2 plugin, four hook families (inject / pre-compaction flush
+      / explicit remember / tool whitelist)
+- [ ] Phase 3: Claude Code & Kimi Code adapters (`adapters/`), semantic-level
+      auto-capture for chat.message, bigram channel for 2-char CJK terms (trigger:
+      a real recall miss in BM25-only mode), cross-project memory graph
 
-## 致谢
+## Acknowledgments
 
-架构参考：[Basic Memory](https://github.com/basicmachines-co/basic-memory)（Markdown+SQLite FTS）、
-[ctx-semantic](https://github.com/guangbin79/ctx-semantic)（BM25+Qwen3-Embedding+RRF）、
-[context-mode](https://github.com/mksglu/context-mode)（钩子拦截范式）。
+Architecture inspired by [Basic Memory](https://github.com/basicmachines-co/basic-memory)
+(Markdown + SQLite FTS), [ctx-semantic](https://github.com/guangbin79/ctx-semantic)
+(BM25 + Qwen3-Embedding + RRF), and [context-mode](https://github.com/mksglu/context-mode)
+(hook-interception paradigm).
