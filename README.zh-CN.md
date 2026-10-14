@@ -55,17 +55,56 @@ bash scripts/download_model.sh  # 输出 MEMORY_MODEL_PATH 导出语句
 memory-mcp                      # http://127.0.0.1:8765/mcp
 memory-mcp --stdio              # stdio 模式（仅 MCP 工具，无 REST 侧车）
 
-# 4. opencode v2：注册 MCP 服务器（~/.config/opencode/opencode.jsonc）
-{
-  "mcp": { "servers": {
-    "memory": { "type": "remote", "url": "http://127.0.0.1:8765/mcp" }
-  } }
-}
+# 4. 在各 harness 注册 MCP 服务器——两种模式二选一
+```
 
-# 5. opencode v2：安装控制面插件
+**模式 A——共享 HTTP 服务**（推荐：全 harness 共享同一记忆库；端口在服务
+启动侧决定，客户端只引用地址）：
+
+```jsonc
+// opencode v2：~/.config/opencode/opencode.jsonc
+{ "mcp": { "memory": { "type": "remote", "url": "http://127.0.0.1:8765/mcp",
+    "headers": { "Authorization": "Bearer {env:MEMORY_TOKEN}" } } } }  // 仅设了 MEMORY_TOKEN 时需要 headers
+```
+
+```json
+// Claude Code：.mcp.json
+{ "mcpServers": { "memory": { "type": "http",
+    "url": "http://127.0.0.1:8765/mcp" } } }
+```
+
+**模式 B——stdio 本地**（每个客户端各自拉起 `memory-mcp --stdio` 子进程；
+设置经配置的 env 字段注入——此模式下这是唯一传参通道；无端口、无
+REST 侧车）：
+
+```jsonc
+// opencode v2：opencode.jsonc（字段名 `environment`，依 @opencode-ai/sdk 类型）
+{ "mcp": { "memory": { "type": "local", "command": ["memory-mcp", "--stdio"],
+    "environment": { "MEMORY_DB_PATH": "/data/memory/memory.db", "MEMORY_DEVICE": "cuda" } } } }
+```
+
+```json
+// Claude Code：.mcp.json
+{ "mcpServers": { "memory": { "command": "memory-mcp", "args": ["--stdio"],
+    "env": { "MEMORY_DB_PATH": "/data/memory/memory.db", "MEMORY_DEVICE": "cpu" } } } }
+```
+
+```toml
+# Codex：~/.codex/config.toml
+[mcp_servers.memory]
+command = "memory-mcp"
+args = ["--stdio"]
+env = { MEMORY_DB_PATH = "/data/memory/memory.db", MEMORY_DEVICE = "cpu" }
+```
+
+```bash
+# 5. opencode v2：安装控制面插件（召回注入等）
 cp opencode-plugin/memory.ts ~/.config/opencode/plugins/
 # 插件目录的 package.json 需有 @opencode/plugin（仅类型）：
-#   cd ~/.config/opencode && npm install @opencode/plugin@beta
+#   cd ~/.config/opencode && npm install @opencode/plugin@^2.0.28
+# ——或不复制，直接在 opencode.jsonc 的 plugin 数组声明，可附带插件
+#   options（见下文"配置"一节）：
+#   "plugin": [["file:///abs/path/opencode-plugin", {"url": "http://127.0.0.1:9000"}]]
 ```
 
 ## 配置（环境变量）

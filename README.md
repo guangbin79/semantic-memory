@@ -67,17 +67,56 @@ bash scripts/download_model.sh  # prints the MEMORY_MODEL_PATH export line
 memory-mcp                      # http://127.0.0.1:8765/mcp
 memory-mcp --stdio              # stdio mode (MCP tools only, no REST sidecar)
 
-# 4. Register the MCP server in opencode v2 (~/.config/opencode/opencode.jsonc)
-{
-  "mcp": { "servers": {
-    "memory": { "type": "remote", "url": "http://127.0.0.1:8765/mcp" }
-  } }
-}
+# 4. Register the MCP server in your harness — pick ONE of two modes
+```
 
-# 5. Install the control-plane plugin
+**Mode A — shared HTTP service** (recommended: one store shared across
+harnesses; the port is chosen at service startup, clients only reference it):
+
+```jsonc
+// opencode v2: ~/.config/opencode/opencode.jsonc
+{ "mcp": { "memory": { "type": "remote", "url": "http://127.0.0.1:8765/mcp",
+    "headers": { "Authorization": "Bearer {env:MEMORY_TOKEN}" } } } }  // headers only if MEMORY_TOKEN is set
+```
+
+```json
+// Claude Code: .mcp.json
+{ "mcpServers": { "memory": { "type": "http",
+    "url": "http://127.0.0.1:8765/mcp" } } }
+```
+
+**Mode B — stdio local** (each client spawns its own `memory-mcp --stdio`
+child; settings are passed via the config's env field — the only channel here;
+no port and no REST sidecar in this mode):
+
+```jsonc
+// opencode v2: opencode.jsonc  (field name `environment` per @opencode-ai/sdk types)
+{ "mcp": { "memory": { "type": "local", "command": ["memory-mcp", "--stdio"],
+    "environment": { "MEMORY_DB_PATH": "/data/memory/memory.db", "MEMORY_DEVICE": "cuda" } } } }
+```
+
+```json
+// Claude Code: .mcp.json
+{ "mcpServers": { "memory": { "command": "memory-mcp", "args": ["--stdio"],
+    "env": { "MEMORY_DB_PATH": "/data/memory/memory.db", "MEMORY_DEVICE": "cpu" } } } }
+```
+
+```toml
+# Codex: ~/.codex/config.toml
+[mcp_servers.memory]
+command = "memory-mcp"
+args = ["--stdio"]
+env = { MEMORY_DB_PATH = "/data/memory/memory.db", MEMORY_DEVICE = "cpu" }
+```
+
+```bash
+# 5. opencode v2: install the control-plane plugin (recall injection etc.)
 cp opencode-plugin/memory.ts ~/.config/opencode/plugins/
 # the plugin directory needs @opencode/plugin (types only):
-#   cd ~/.config/opencode && npm install @opencode/plugin@beta
+#   cd ~/.config/opencode && npm install @opencode/plugin@^2.0.28
+# — or declare it in opencode.jsonc's "plugin" array instead, optionally with
+#   plugin options (see "Configuration" below):
+#   "plugin": [["file:///abs/path/opencode-plugin", {"url": "http://127.0.0.1:9000"}]]
 ```
 
 ## Configuration (environment variables)
