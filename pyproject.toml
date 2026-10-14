@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "memory-mcp"
+version = "0.1.0"
+description = "Hybrid (BM25 + vector + RRF) semantic memory MCP server for opencode v2, with a thin v2 plugin for automatic recall/capture"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "fastmcp>=2.3",
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+# 向量嵌入：Qwen3-Embedding-0.6B GGUF，缺省时自动降级为纯 BM25
+embed = ["llama-cpp-python>=0.2.90"]
+dev = ["pytest>=8"]
+
+[project.scripts]
+memory-mcp = "memory_mcp.server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

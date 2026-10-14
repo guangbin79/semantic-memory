@@ -1,0 +1,14 @@
+{
+  "name": "opencode-plugin-semantic-memory",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Thin opencode v2 control-plane plugin for memory-mcp (zero runtime deps)",
+  "devDependencies": {
+    "@opencode/plugin": "beta",
+    "typescript": "^5.5.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit --strict --module esnext --moduleResolution bundler memory.ts"
+  }
+}
