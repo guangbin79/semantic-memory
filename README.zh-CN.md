@@ -217,8 +217,20 @@ GPU 运行期嵌入失败（如 OOM）自动 CPU 重建重试一次。无 NVIDIA
 
 ```bash
 pip install -e ".[dev]"
-pytest            # 8 项：存储/双通道召回/软删除/RRF 数学/CJK 子串/查询前缀约定/容错
+pytest            # 31 项：存储/双通道召回/软删除/RRF 数学/CJK 子串/查询前缀约定/
+                  # 容错/生命周期去重与 TTL/迁移/REST 与 /api 路由/
+                  # 批量双闸门鉴权/MCP 工具层
+
+cd opencode-plugin
+npm install       # 然后：
+npm run typecheck # tsc --strict，类型基线 @opencode/plugin 2.0.28
+npm test          # 构建 + 16 项 mock-ctx 钩子断言（打真实服务；
+                  # stable 线：注入/去重/显式记忆/压缩托管/工具捕获；
+                  # legacy 线：v1 钩子映射、synthetic part、compacting 重置）
 ```
+
+插件另经真实 opencode dev 加载器（`0.0.0-dev-202610130450`）验证：双形态导出
+被接受、自动选 legacy 线、项目标识正确解析为工作区目录，无加载错误。
 
 ## 分期路线
 

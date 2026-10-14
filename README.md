@@ -250,9 +250,22 @@ channel (~15 lines, zero dependencies) — see the roadmap.
 
 ```bash
 pip install -e ".[dev]"
-pytest            # 8 tests: store / dual-channel recall / soft delete / RRF math /
-                  # CJK substring / query-prefix contract / fault tolerance
+pytest            # 31 tests: store / dual-channel recall / soft delete / RRF math /
+                  # CJK substring / query-prefix contract / fault tolerance /
+                  # lifecycle dedup & TTL / migration / REST & /api routes /
+                  # bulk double-gate auth / MCP tool layer
+
+cd opencode-plugin
+npm install       # then:
+npm run typecheck # tsc --strict against @opencode/plugin 2.0.28 types
+npm test          # build + 16 mock-ctx hook assertions against a live service
+                  # (stable line: inject/dedup/remember/compaction/tool-capture;
+                  #  legacy line: v1 hook map, synthetic parts, compacting reset)
 ```
+
+The plugin is additionally verified against the real opencode dev loader
+(`0.0.0-dev-202610130450`): it loads the dual-form export, selects the legacy
+line, and resolves the workspace as project — no load errors.
 
 ## Roadmap
 

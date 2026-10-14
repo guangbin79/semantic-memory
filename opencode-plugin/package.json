@@ -4,11 +4,19 @@
   "private": true,
   "type": "module",
   "description": "Thin opencode v2 control-plane plugin for memory-mcp (zero runtime deps)",
+  "main": "./memory.ts",
+  "exports": {
+    ".": "./memory.ts",
+    "./server": "./memory.ts"
+  },
   "devDependencies": {
-    "@opencode/plugin": "beta",
-    "typescript": "^5.5.0"
+    "@opencode/plugin": "^2.0.28",
+    "@types/node": "^26.6.5",
+    "typescript": "^5.9.3"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit --strict --module esnext --moduleResolution bundler memory.ts"
+    "typecheck": "node ./node_modules/typescript/bin/tsc --noEmit --strict --skipLibCheck --target es2022 --module esnext --moduleResolution bundler memory.ts",
+    "build": "node ./node_modules/typescript/bin/tsc memory.ts --module esnext --moduleResolution bundler --target es2022 --skipLibCheck --outDir dist",
+    "test": "npm run build && node test-hooks.mjs"
   }
 }
