@@ -275,17 +275,67 @@ class MemoryStore:
         order = {u: i for i, u in enumerate(uids)}
         return sorted(rows, key=lambda r: order[r["uid"]])
 
-    def list_recent(self, project: str | None = None, limit: int = 20) -> list[sqlite3.Row]:
+    _ROW_COLS = "uid, content, kind, source, project, tags, created_at, updated_at"
+
+    def get_one(self, uid: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            f"SELECT {self._ROW_COLS} FROM memories WHERE uid=? AND deleted=0", (uid,)
+        ).fetchone()
+
+    def list_page(
+        self,
+        kind: str | None = None,
+        source: str | None = None,
+        project: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[int, list[sqlite3.Row]]:
+        """分页 + 过滤（编排历史浏览用）。返回 (total, rows)，按时间倒序。"""
+        conds, params = ["deleted = 0"], []
+        for col, val in (("kind", kind), ("source", source), ("project", project)):
+            if val:
+                conds.append(f"{col} = ?")
+                params.append(val)
+        where = " AND ".join(conds)
+        total = self.conn.execute(
+            f"SELECT COUNT(*) c FROM memories WHERE {where}", params
+        ).fetchone()["c"]
+        rows = self.conn.execute(
+            f"SELECT {self._ROW_COLS} FROM memories WHERE {where}"
+            " ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            (*params, min(limit, 200), offset),
+        ).fetchall()
+        return total, rows
+
+    def projects(self) -> list[str]:
+        return [
+            r[0]
+            for r in self.conn.execute(
+                "SELECT DISTINCT project FROM memories"
+                " WHERE deleted=0 AND project IS NOT NULL ORDER BY 1"
+            )
+        ]
+
+    def list_recent(
+        self,
+        project: str | None = None,
+        kind: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> list[sqlite3.Row]:
         sql = (
-            "SELECT uid, content, kind, source, project, tags, created_at FROM memories"
-            " WHERE deleted = 0"
+            "SELECT uid, content, kind, source, project, tags, created_at, updated_at"
+            " FROM memories WHERE deleted = 0"
         )
         params: list = []
         if project:
             sql += " AND project = ?"
             params.append(project)
-        sql += " ORDER BY created_at DESC LIMIT ?"
-        params.append(limit)
+        if kind:
+            sql += " AND kind = ?"
+            params.append(kind)
+        sql += " ORDER BY updated_at DESC LIMIT ? OFFSET ?"
+        params += [limit, offset]
         return self.conn.execute(sql, params).fetchall()
 
     def stats(self) -> dict:

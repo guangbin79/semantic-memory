@@ -89,6 +89,18 @@ def test_query_instruct_prefix():
     assert q.endswith("Query: GDAL 驱动")
 
 
+def test_list_recent_kind_and_offset(store):
+    for i in range(5):
+        store.store(f"fact number {i}", kind="fact", project="p1")
+    store.store("a preference", kind="preference", project="p1")
+    facts = store.list_recent(kind="fact", limit=10)
+    assert len(facts) == 5
+    page1 = store.list_recent(project="p1", limit=4, offset=0)
+    page2 = store.list_recent(project="p1", limit=4, offset=4)
+    assert len(page1) == 4 and len(page2) == 2
+    assert {r["uid"] for r in page1}.isdisjoint({r["uid"] for r in page2})
+
+
 def test_fts_special_chars_no_crash(store, no_embedder):
     store.store("C++ Qt compile_commands.json 必须生成", kind="preference")
     # 特殊字符查询不应抛异常

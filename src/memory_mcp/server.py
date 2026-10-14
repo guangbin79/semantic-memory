@@ -11,7 +11,9 @@ import sys
 
 from fastmcp import FastMCP
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse
+
+from .web import INDEX_HTML
 
 from .config import Config
 from .db import MemoryStore
@@ -103,6 +105,49 @@ def _authorized(request: Request) -> bool:
 async def rest_health(_: Request) -> JSONResponse:
     s = store.stats()
     return JSONResponse({"status": "ok", "embedder": embedder.available, "device": embedder.device, **s})
+
+
+# ---------------- 人用读/管接口 + 内置浏览页 ----------------
+# 读接口 + 单条遗忘：与 CLI 同级的人工信道。批量销毁依旧只走启动钩子/CLI。
+
+@mcp.custom_route("/", methods=["GET"])
+async def web_index(_: Request) -> HTMLResponse:
+    return HTMLResponse(INDEX_HTML)
+
+
+@mcp.custom_route("/api/stats", methods=["GET"])
+async def api_stats(request: Request) -> JSONResponse:
+    if not _authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    return JSONResponse({**store.stats(), "embedder": embedder.available,
+                         "device": embedder.device})
+
+
+@mcp.custom_route("/api/memories", methods=["GET"])
+async def api_memories(request: Request) -> JSONResponse:
+    if not _authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    q = request.query_params
+    rows = store.list_recent(
+        project=q.get("project") or None,
+        kind=q.get("kind") or None,
+        limit=min(int(q.get("limit", 50)), 200),
+        offset=int(q.get("offset", 0)),
+    )
+    return JSONResponse({"memories": [
+        {"uid": r["uid"], "content": r["content"], "kind": r["kind"],
+         "source": r["source"], "project": r["project"], "tags": r["tags"],
+         "created_at": r["created_at"], "updated_at": r["updated_at"]}
+        for r in rows
+    ]})
+
+
+@mcp.custom_route("/api/memories/{uid}", methods=["DELETE"])
+async def api_forget(request: Request) -> JSONResponse:
+    if not _authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    uid = request.path_params["uid"]
+    return JSONResponse({"uid": uid, "forgotten": store.forget(uid)})
 
 
 @mcp.custom_route("/recall", methods=["POST"])

@@ -147,6 +147,23 @@ cp opencode-plugin/memory.ts ~/.config/opencode/plugins/
 （WAL 锁语义不可靠）；跨机迁移走备份。在出现硬隔离需求之前，优先用
 单实例 + `project` 过滤。
 
+## HTTP 读/管接口 + 内置浏览页
+
+同一进程还提供**人面信道**（与钩子用的 `/recall` `/ingest` 区分，
+鉴权规则一致：配置了 `MEMORY_TOKEN` 即需 Bearer）：
+
+| 端点 | 用途 |
+|---|---|
+| `GET /` | 自包含浏览页（零构建、零框架、离线可用） |
+| `GET /api/stats` | 总量、向量化数、库体积、嵌入通道/设备 |
+| `GET /api/memories?kind=&project=&limit=&offset=` | 分页浏览，按更新时间倒序 |
+| `DELETE /api/memories/{uid}` | 单条遗忘（与 CLI 同信任级） |
+
+浏览器打开 `http://127.0.0.1:8765/` 即可查看统计总览、RRF 检索、
+kind/project 过滤和单条遗忘。功能刻意保持只读为主：可观测性让
+"相关性不丢失"可被验证——但这里没有批量编辑，破坏性批量操作依旧
+只走启动钩子/CLI。
+
 ## 维护与生命周期
 
 保留策略是**配置，不是 LLM 的自由裁量**。批量破坏性操作**刻意不作为 MCP

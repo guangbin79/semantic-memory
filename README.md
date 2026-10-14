@@ -167,6 +167,23 @@ auto-created). One db file per service instance — for hard db-level isolation
 synced folders (WAL locking semantics); use backups for cross-machine movement.
 Until a hard isolation need exists, prefer one instance + `project` filtering.
 
+## HTTP read/manage API + built-in web UI
+
+The same process also serves a **human-facing** channel (distinct from the
+hook-facing `/recall` `/ingest`, same auth rule: Bearer when `MEMORY_TOKEN` is set):
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /` | Self-contained browse page (zero build, zero framework, offline-capable) |
+| `GET /api/stats` | Totals, vectorized count, db size, embedder/device |
+| `GET /api/memories?kind=&project=&limit=&offset=` | Paginated browse, newest-updated first |
+| `DELETE /api/memories/{uid}` | Single-entry forget (same trust level as the CLI) |
+
+Open `http://127.0.0.1:8765/` for stats overview, RRF search, kind/project
+filtering, and single-entry forgetting. Scope is deliberately read-mostly:
+observability is what makes "relevance is never lost" believable — but there is
+no bulk editing here; destructive batch operations stay on the startup hook / CLI.
+
 ## Maintenance & lifecycle
 
 Retention policy is **configuration, not LLM discretion**. Bulk destructive
