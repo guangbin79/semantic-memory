@@ -35,13 +35,13 @@ def hybrid_recall(
     bm25_hits = store.fts_search(query, candidate_n)
     bm25_ranked = [uid for uid, _ in bm25_hits]
 
-    # 通道 2：向量余弦（暴力，个人规模足够）
+    # 通道 2：向量余弦（暴力，~50k 条内亚毫秒；查询侧自动带 Instruct 前缀）
     vec_ranked: list[str] = []
-    q = embedder.embed([query])
+    q = embedder.embed_query(query)
     if q is not None:
         uids, mat = store.all_vectors(project=project)
         if len(uids):
-            sims = mat @ q[0]                      # 已归一化，点积即余弦
+            sims = mat @ q                           # 已归一化，点积即余弦
             top = np.argsort(-sims)[:candidate_n]
             vec_ranked = [uids[i] for i in top if sims[i] > 0.0]
 

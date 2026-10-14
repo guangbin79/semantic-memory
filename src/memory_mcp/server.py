@@ -22,7 +22,7 @@ log = logging.getLogger("memory_mcp")
 
 cfg = Config.from_env()
 store = MemoryStore(cfg.db_path)
-embedder = Embedder(cfg.model_path, dim=cfg.embed_dim)
+embedder = Embedder(cfg.model_path, dim=cfg.embed_dim, device=cfg.device)
 
 mcp = FastMCP(
     name="memory",
@@ -44,7 +44,7 @@ def memory_store(
     project: str | None = None,
 ) -> dict:
     """存入一条记忆。kind: fact|decision|preference|artifact。返回 uid。"""
-    vec = embedder.embed([content])
+    vec = embedder.embed_batch([content])
     uid = store.store(
         content=content,
         kind=kind,
@@ -88,7 +88,7 @@ def memory_list(project: str | None = None, limit: int = 20) -> list[dict]:
 @mcp.tool
 def memory_stats() -> dict:
     """库统计：总量、向量化比例、按 kind 分布、嵌入通道状态。"""
-    return {**store.stats(), "embedder": embedder.available}
+    return {**store.stats(), "embedder": embedder.available, "device": embedder.device}
 
 
 # ---------------- REST 侧车（插件专用） ----------------
@@ -103,7 +103,7 @@ def _authorized(request: Request) -> bool:
 @mcp.custom_route("/health", methods=["GET"])
 async def rest_health(_: Request) -> JSONResponse:
     s = store.stats()
-    return JSONResponse({"status": "ok", "embedder": embedder.available, **s})
+    return JSONResponse({"status": "ok", "embedder": embedder.available, "device": embedder.device, **s})
 
 
 @mcp.custom_route("/recall", methods=["POST"])
@@ -127,7 +127,7 @@ async def rest_ingest(request: Request) -> JSONResponse:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     body = await request.json()
     content = body["content"]
-    vec = embedder.embed([content])
+    vec = embedder.embed_batch([content])
     uid = store.store(
         content=content,
         kind=body.get("kind", "fact"),
@@ -145,7 +145,7 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, stream=sys.stderr,
                         format="%(asctime)s %(name)s %(levelname)s %(message)s")
     transport = "stdio" if "--stdio" in sys.argv else "http"
-    log.info("db=%s embedder=%s transport=%s", cfg.db_path, embedder.available, transport)
+    log.info("db=%s embedder=%s prefer=%s transport=%s", cfg.db_path, embedder.available, cfg.device, transport)
     if cfg.token is None and cfg.host != "127.0.0.1":
         log.warning("MEMORY_TOKEN 未设置且绑定非回环地址 %s，REST 侧车无鉴权！", cfg.host)
     if transport == "stdio":

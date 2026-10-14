@@ -19,6 +19,7 @@ class Config:
     token: str | None          # REST 侧车鉴权；None 表示仅本机回环保护
     model_path: Path | None    # Qwen3-Embedding-0.6B GGUF；None → 纯 BM25 降级
     embed_dim: int
+    device: str                # cuda（默认）| cpu
     recall_limit_default: int
     rrf_k: int                 # RRF 常数，经典值 60
 
@@ -32,6 +33,7 @@ class Config:
             token=os.environ.get("MEMORY_TOKEN") or None,
             model_path=Path(model) if model else None,
             embed_dim=int(os.environ.get("MEMORY_EMBED_DIM", "1024")),
+            device=os.environ.get("MEMORY_DEVICE", "cuda").lower(),
             recall_limit_default=int(os.environ.get("MEMORY_RECALL_LIMIT", "5")),
             rrf_k=int(os.environ.get("MEMORY_RRF_K", "60")),
         )

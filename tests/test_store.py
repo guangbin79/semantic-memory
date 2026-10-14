@@ -46,10 +46,11 @@ def test_vector_channel_rrf(store):
 
     class FakeEmbedder:
         available = True
-        def embed(self, texts):
-            q = np.zeros(dim, dtype=np.float32)
-            q[0] = 1.0
-            return np.stack([q])
+        device = "cpu"
+        def embed_batch(self, texts):
+            return np.stack([np.eye(dim, dtype=np.float32)[0] for _ in texts])
+        def embed_query(self, text):
+            return np.eye(dim, dtype=np.float32)[0]
 
     hits = hybrid_recall(store, FakeEmbedder(), "rasters", limit=5)
     assert hits and hits[0]["uid"] == uid
@@ -78,6 +79,14 @@ def test_cjk_substring_recall(store, no_embedder):
     store.store("完全不相关的英文条目 completely different", kind="fact")
     hits = hybrid_recall(store, no_embedder, "格式驱动", limit=5)  # 4 字中文子串
     assert hits and hits[0]["uid"] == uid
+
+
+def test_query_instruct_prefix():
+    """锁定与 ctx-semantic 一致的非对称嵌入约定：查询带 Instruct 前缀，文档不带。"""
+    from memory_mcp.embedder import format_query
+    q = format_query("GDAL 驱动")
+    assert q.startswith("Instruct: Given a web search query")
+    assert q.endswith("Query: GDAL 驱动")
 
 
 def test_fts_special_chars_no_crash(store, no_embedder):

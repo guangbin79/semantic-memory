@@ -60,6 +60,7 @@ cp opencode-plugin/memory.ts ~/.config/opencode/plugins/
 |---|---|---|
 | `MEMORY_DB_PATH` | `~/.local/share/memory-mcp/memory.db` | 数据库路径 |
 | `MEMORY_MODEL_PATH` | 空 | GGUF 模型路径；空 = 纯 BM25 降级 |
+| `MEMORY_DEVICE` | `cuda` | 嵌入设备：`cuda`（默认，失败自动回退 CPU）/ `cpu` |
 | `MEMORY_HOST` / `MEMORY_PORT` | `127.0.0.1` / `8765` | 绑定地址 |
 | `MEMORY_TOKEN` | 空 | REST 侧车 Bearer 鉴权；绑非回环地址时**必配** |
 | `MEMORY_RRF_K` | `60` | RRF 融合常数 |
@@ -74,6 +75,22 @@ cp opencode-plugin/memory.ts ~/.config/opencode/plugins/
 | `MEMORY_PLUGIN_BUDGET_CHARS` | `2000` | 注入块字符预算 |
 | `MEMORY_PLUGIN_TOOL_CAPTURE` | 空 | 工具捕获白名单（逗号分隔），如 `gis,bash` |
 | `MEMORY_PLUGIN_AUTOSTART` | `0` | `=1` 时服务未启动则自动 spawn |
+
+## 向量通道（与 ctx-semantic 同源）
+
+嵌入层逐项对齐 [ctx-semantic](https://github.com/guangbin79/ctx-semantic) 的向量与方式，
+同一模型产出同一向量（llama-cpp-python 也锁定同一版本 0.3.35）：
+
+- 模型：Qwen3-Embedding-0.6B **Q8_0** GGUF，dim 1024，pooling **LAST**（显式指定）
+- 非对称嵌入：**查询侧**自动加 `Instruct: ...\nQuery: {text}` 前缀，**文档侧**原文
+- n_ctx=8192，批大小 32 子批，float32 行 L2 归一化（1e-12 保护）
+- 向量检索：暴力余弦（~50k 条内亚毫秒，无需 ANN）
+
+**设备策略（本项目规格，与 ctx-semantic 相反）**：`MEMORY_DEVICE=cuda` 为**默认**，
+`cpu` 可选。GPU 路径带确定性回退：模型加载 → 探针嵌入 → **nvidia-smi PID 验证**
+（识别"声称 GPU 实际 CPU"的静默回退）→ 任何失败重建于 CPU 并记日志；
+GPU 运行期嵌入失败（如 OOM）自动 CPU 重建重试一次。无 NVIDIA 环境设
+`MEMORY_DEVICE=cpu` 可跳过 GPU 尝试。`memory_stats` / `/health` 返回实际运行设备。
 
 ## 中文检索说明
 
