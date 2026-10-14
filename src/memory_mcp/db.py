@@ -1,6 +1,7 @@
 """存储层：SQLite + FTS5(外部内容表) + 向量 BLOB。单写者，线程内单连接。"""
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import time
@@ -8,6 +9,11 @@ import uuid
 from pathlib import Path
 
 import numpy as np
+
+
+def content_hash(text: str) -> str:
+    """去重键：去首尾空白后的 sha256 截断。精确去重与迁移回填共用。"""
+    return hashlib.sha256(text.strip().encode("utf-8")).hexdigest()[:32]
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS memories (
@@ -20,7 +26,8 @@ CREATE TABLE IF NOT EXISTS memories (
     tags       TEXT NOT NULL DEFAULT '[]',        -- JSON array
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL,
-    deleted    INTEGER NOT NULL DEFAULT 0
+    deleted    INTEGER NOT NULL DEFAULT 0,
+    content_hash TEXT                            -- 摄取去重键（sha256[:32]）
 );
 -- 双 FTS 通道：porter 处理英文词干/标签，trigram 处理 CJK 子串（≥3 字符）。
 -- 中文连续文本在 porter 下会塌缩成单个大 token 导致不可检索，trigram 通道是中文召回的关键。
@@ -75,6 +82,26 @@ class MemoryStore:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.executescript(SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """轻量迁移：为既有库补 content_hash 列（摄取去重键），索引始终确保。
+
+        索引不在 SCHEMA 里建——旧库缺列时 CREATE INDEX 会在列添加之前失败。
+        """
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(memories)")}
+        with self.conn:
+            if "content_hash" not in cols:
+                self.conn.execute("ALTER TABLE memories ADD COLUMN content_hash TEXT")
+                for rid, content in self.conn.execute("SELECT id, content FROM memories"):
+                    self.conn.execute(
+                        "UPDATE memories SET content_hash=? WHERE id=?",
+                        (content_hash(content), rid),
+                    )
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_memories_hash"
+                " ON memories(content_hash) WHERE deleted=0"
+            )
 
     # ---------- 写入 ----------
 
@@ -93,9 +120,11 @@ class MemoryStore:
         now = time.time()
         with self.conn:
             self.conn.execute(
-                "INSERT INTO memories(uid, content, kind, source, project, tags, created_at, updated_at)"
-                " VALUES (?,?,?,?,?,?,?,?)",
-                (uid, content, kind, source, project, json.dumps(tags or [], ensure_ascii=False), now, now),
+                "INSERT INTO memories(uid, content, kind, source, project, tags,"
+                " created_at, updated_at, content_hash)"
+                " VALUES (?,?,?,?,?,?,?,?,?)",
+                (uid, content, kind, source, project, json.dumps(tags or [], ensure_ascii=False),
+                 now, now, content_hash(content)),
             )
             if embedding is not None:
                 vec = np.asarray(embedding, dtype=np.float32)
@@ -114,6 +143,62 @@ class MemoryStore:
             )
             self.conn.execute("DELETE FROM memories_vec WHERE uid=?", (uid,))
         return cur.rowcount > 0
+
+    # ---------- 去重与维护（维护面：启动钩子/CLI，不经 MCP 工具暴露） ----------
+
+    def find_by_hash(self, h: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT uid, updated_at FROM memories WHERE content_hash=? AND deleted=0",
+            (h,),
+        ).fetchone()
+
+    def touch(self, uid: str) -> None:
+        """去重命中：刷新时间戳（等价于'这条记忆再次被证实相关'）。"""
+        with self.conn:
+            self.conn.execute(
+                "UPDATE memories SET updated_at=? WHERE uid=?", (time.time(), uid)
+            )
+
+    def purge_soft_deleted(self) -> int:
+        """硬删软删除条目，真正回收空间（向量在 forget 时已移除）。"""
+        with self.conn:
+            cur = self.conn.execute("DELETE FROM memories WHERE deleted=1")
+        return cur.rowcount
+
+    def purge_older_than(self, kind: str, cutoff_ts: float) -> int:
+        """TTL 硬清：指定 kind 且创建时间早于 cutoff 的活条目。DELETE 触发器同步 FTS。"""
+        uids = [
+            r["uid"]
+            for r in self.conn.execute(
+                "SELECT uid FROM memories WHERE kind=? AND deleted=0 AND created_at<?",
+                (kind, cutoff_ts),
+            )
+        ]
+        if not uids:
+            return 0
+        marks = ",".join("?" * len(uids))
+        with self.conn:
+            self.conn.execute(f"DELETE FROM memories_vec WHERE uid IN ({marks})", uids)
+            cur = self.conn.execute(f"DELETE FROM memories WHERE uid IN ({marks})", uids)
+        return cur.rowcount
+
+    def entries_without_vectors(self, limit: int = 500) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT m.uid, m.content FROM memories m"
+            " LEFT JOIN memories_vec v ON m.uid = v.uid"
+            " WHERE m.deleted = 0 AND v.uid IS NULL LIMIT ?",
+            (limit,),
+        ).fetchall()
+
+    def insert_vector(self, uid: str, vec) -> None:
+        with self.conn:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO memories_vec(uid, embedding) VALUES (?,?)",
+                (uid, np.asarray(vec, dtype=np.float32).tobytes()),
+            )
+
+    def vacuum(self) -> None:
+        self.conn.execute("VACUUM")
 
     # ---------- 读取 ----------
 
@@ -214,7 +299,8 @@ class MemoryStore:
                 "SELECT kind, COUNT(*) c FROM memories WHERE deleted=0 GROUP BY kind"
             )
         }
-        return {"total": total, "vectorized": vecs, "by_kind": by_kind}
+        size = self.db_path.stat().st_size if self.db_path.exists() else 0
+        return {"total": total, "vectorized": vecs, "by_kind": by_kind, "db_bytes": size}
 
     def close(self) -> None:
         self.conn.close()

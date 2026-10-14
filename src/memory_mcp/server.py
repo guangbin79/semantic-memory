@@ -17,6 +17,7 @@ from .config import Config
 from .db import MemoryStore
 from .embedder import Embedder
 from .hybrid import hybrid_recall
+from .lifecycle import backfill_vectors, ingest_with_dedup, run_maintenance
 
 log = logging.getLogger("memory_mcp")
 
@@ -43,17 +44,15 @@ def memory_store(
     tags: list[str] | None = None,
     project: str | None = None,
 ) -> dict:
-    """存入一条记忆。kind: fact|decision|preference|artifact。返回 uid。"""
-    vec = embedder.embed_batch([content])
-    uid = store.store(
-        content=content,
-        kind=kind,
-        source="manual",
-        project=project,
-        tags=tags,
-        embedding=vec[0] if vec is not None else None,
+    """存入一条记忆。kind: fact|decision|preference|artifact。返回 uid。
+
+    写入路径内嵌去重：内容相同（或同项目内向量近似）时刷新已有条目
+    时间戳而非新增——deduped=true 表示命中去重。
+    """
+    uid, deduped = ingest_with_dedup(
+        store, embedder, content, kind, "manual", project, tags, cfg.dedup_sim
     )
-    return {"uid": uid, "vectorized": vec is not None}
+    return {"uid": uid, "deduped": deduped, "vectorized": embedder.available}
 
 
 @mcp.tool
@@ -126,17 +125,16 @@ async def rest_ingest(request: Request) -> JSONResponse:
     if not _authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     body = await request.json()
-    content = body["content"]
-    vec = embedder.embed_batch([content])
-    uid = store.store(
-        content=content,
+    uid, deduped = ingest_with_dedup(
+        store, embedder,
+        content=body["content"],
         kind=body.get("kind", "fact"),
         source=body.get("source", "chat"),
         project=body.get("project"),
         tags=body.get("tags"),
-        embedding=vec[0] if vec is not None else None,
+        dedup_sim=cfg.dedup_sim,
     )
-    return JSONResponse({"uid": uid})
+    return JSONResponse({"uid": uid, "deduped": deduped})
 
 
 # ---------------- 入口 ----------------
@@ -144,7 +142,24 @@ async def rest_ingest(request: Request) -> JSONResponse:
 def main() -> None:
     logging.basicConfig(level=logging.INFO, stream=sys.stderr,
                         format="%(asctime)s %(name)s %(levelname)s %(message)s")
-    transport = "stdio" if "--stdio" in sys.argv else "http"
+    args = sys.argv[1:]
+    cmd = next((a for a in args if not a.startswith("-")), "serve")
+
+    # ---- 管理子命令（维护面：LLM 够不到的地方）----
+    if cmd == "purge":
+        report = run_maintenance(store, ttl_artifact_days=cfg.ttl_artifact_days)
+        print(json.dumps(report, ensure_ascii=False))
+        return
+    if cmd == "backfill":
+        print(json.dumps(backfill_vectors(store, embedder), ensure_ascii=False))
+        return
+
+    # ---- serve：启动维护钩子（频率=服务重启，天级粒度足够）----
+    if cfg.maintenance_on_start:
+        log.info("startup maintenance: %s",
+                 run_maintenance(store, ttl_artifact_days=cfg.ttl_artifact_days))
+
+    transport = "stdio" if "--stdio" in args else "http"
     log.info("db=%s embedder=%s prefer=%s transport=%s", cfg.db_path, embedder.available, cfg.device, transport)
     if cfg.token is None and cfg.host != "127.0.0.1":
         log.warning("MEMORY_TOKEN 未设置且绑定非回环地址 %s，REST 侧车无鉴权！", cfg.host)

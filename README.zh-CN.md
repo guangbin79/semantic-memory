@@ -80,6 +80,9 @@ cp opencode-plugin/memory.ts ~/.config/opencode/plugins/
 | `MEMORY_HOST` / `MEMORY_PORT` | `127.0.0.1` / `8765` | 绑定地址 |
 | `MEMORY_TOKEN` | 空 | REST 侧车 Bearer 鉴权；绑非回环地址时**必配** |
 | `MEMORY_RRF_K` | `60` | RRF 融合常数 |
+| `MEMORY_TTL_ARTIFACT_DAYS` | `90` | `artifact` 类 TTL 天数；`0` = 不过期 |
+| `MEMORY_MAINTENANCE_ON_START` | `1` | 服务启动时运行维护例程 |
+| `MEMORY_DEDUP_SIM` | `0.98` | 向量近似去重阈值（同 project 内） |
 
 插件：
 
@@ -103,8 +106,8 @@ cp opencode-plugin/memory.ts ~/.config/opencode/plugins/
 - **捕获是至多一次**：钩子 fire-and-forget（1.5s 预算）。服务宕机期间到达的
   记忆会被静默丢弃——阻塞会话比漏一条记忆更糟。持久性是 best-effort，
   不是 exactly-once。
-- **向量空洞**：嵌入器未配置期间写入的条目只有 BM25 可检索；不会自动回向量
-  补嵌（`memory_backfill` 管理工具在路线图上）。
+- **向量空洞**：嵌入器未配置期间写入的条目只有 BM25 可检索；装好模型后用
+  `memory-mcp backfill` CLI 一次性追平（见"维护与生命周期"）。
 
 ## 存储布局
 
@@ -144,6 +147,24 @@ cp opencode-plugin/memory.ts ~/.config/opencode/plugins/
 （WAL 锁语义不可靠）；跨机迁移走备份。在出现硬隔离需求之前，优先用
 单实例 + `project` 过滤。
 
+## 维护与生命周期
+
+保留策略是**配置，不是 LLM 的自由裁量**。批量破坏性操作**刻意不作为 MCP
+工具暴露**——它们待在 prompt 注入够不到的地方：启动钩子和 CLI。agent 只能
+`memory_forget`（单条、用户发起）和 `memory_stats`（观察和建议）。
+
+- **摄取去重**（写入路径内嵌，无人"调用"）：精确内容哈希（全局）或向量
+  近似（同 project，余弦 ≥ `MEMORY_DEDUP_SIM`）命中时刷新已有条目时间戳，
+  不新增——重复出现视为"再次被证实相关"。这直接掐住压缩托管类来源反复
+  存入近似内容导致的增长斜率。
+- **保留分层**：`preference` / `decision` / `fact` 永久；`artifact`
+  （工具捕获）按 `MEMORY_TTL_ARTIFACT_DAYS` 过期。
+- **`memory-mcp purge`**：硬删软删除条目 → TTL 清理 → 有实际删除才 `VACUUM`。
+  同一例程在每次服务启动时运行（`MEMORY_MAINTENANCE_ON_START=1`）——
+  重启频率对天级粒度的保留策略足够；无 cron、无后台线程。
+- **`memory-mcp backfill`**：为所有缺向量的活条目补算嵌入（装模型后的
+  一次性追平）。重操作，保持手动。
+
 ## 向量通道（与 ctx-semantic 同源）
 
 嵌入层逐项对齐 [ctx-semantic](https://github.com/guangbin79/ctx-semantic) 的向量与方式，
@@ -181,9 +202,10 @@ pytest            # 8 项：存储/双通道召回/软删除/RRF 数学/CJK 子�
 - [x] 第一期：MCP 工具 + 混合检索 + REST 侧车（本仓库当前状态）
 - [x] 第二期：opencode v2 插件四族钩子（注入 / 压缩前托管 / 显式记忆 / 工具白名单）
 - [x] 第三期a：多宿主适配器（`adapters/`——Claude Code、Kimi Code、Codex 模板）
-- [ ] 第三期b：chat.message 语义级
-      自动捕获、两字中文词 bigram 通道（触发条件：纯 BM25 模式出现真实漏召回）、
-      跨项目记忆图谱
+- [x] 第三期b：生命周期维护——摄取去重、TTL/purge/VACUUM、向量补嵌
+      （启动钩子 + CLI，刻意不在 MCP 工具面）
+- [ ] 第三期c：chat.message 语义级自动捕获、两字中文词 bigram 通道
+      （触发条件：纯 BM25 模式出现真实漏召回）、跨项目记忆图谱、冷文件归档
 
 ## 致谢
 

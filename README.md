@@ -92,6 +92,9 @@ Service:
 | `MEMORY_HOST` / `MEMORY_PORT` | `127.0.0.1` / `8765` | Bind address |
 | `MEMORY_TOKEN` | empty | REST sidecar Bearer auth; **required** when binding non-loopback |
 | `MEMORY_RRF_K` | `60` | RRF fusion constant |
+| `MEMORY_TTL_ARTIFACT_DAYS` | `90` | TTL for `artifact` kind; `0` = never expire |
+| `MEMORY_MAINTENANCE_ON_START` | `1` | Run the maintenance routine at service startup |
+| `MEMORY_DEDUP_SIM` | `0.98` | Cosine threshold for vector near-duplicate ingest dedup |
 
 Plugin:
 
@@ -118,8 +121,8 @@ Plugin:
   arrive while the service is down are silently dropped — a blocked session is
   worse than a missed memory. Durability is best-effort, not exactly-once.
 - **Vector gap**: entries written while the embedder is unconfigured stay
-  BM25-searchable only; there is no automatic backfill (a `memory_backfill`
-  admin tool is on the roadmap).
+  BM25-searchable only; after installing the model, reconcile once with the
+  `memory-mcp backfill` CLI (see Maintenance & lifecycle).
 
 ## Storage layout
 
@@ -163,6 +166,29 @@ auto-created). One db file per service instance — for hard db-level isolation
 `MEMORY_PLUGIN_URL` at the right one. Do NOT put the live db on NFS/SMB or
 synced folders (WAL locking semantics); use backups for cross-machine movement.
 Until a hard isolation need exists, prefer one instance + `project` filtering.
+
+## Maintenance & lifecycle
+
+Retention policy is **configuration, not LLM discretion**. Bulk destructive
+operations are deliberately **not exposed as MCP tools** — they live where
+prompt injection cannot reach: the startup hook and the CLI. The agent can only
+`memory_forget` (single entry, user-initiated) and `memory_stats` (observe and
+recommend).
+
+- **Ingest dedup** (in the write path, nobody "calls" it): exact content-hash
+  match (global) or vector near-duplicate (same project, cosine ≥
+  `MEMORY_DEDUP_SIM`) refreshes the existing entry's timestamp instead of
+  inserting — recurrence is treated as "proven relevant again". This caps the
+  growth slope of compaction-flush sources, which love re-storing near-identical
+  content.
+- **Retention tiers**: `preference` / `decision` / `fact` are permanent;
+  `artifact` (tool captures) expires after `MEMORY_TTL_ARTIFACT_DAYS`.
+- **`memory-mcp purge`**: hard-deletes soft-deleted entries, applies the TTL,
+  then `VACUUM` (only when something was actually removed). Same routine runs at
+  every service start (`MEMORY_MAINTENANCE_ON_START=1`) — restart frequency is
+  enough for day-granularity retention; no cron, no background threads.
+- **`memory-mcp backfill`**: embeds every live entry that has no vector yet
+  (one-shot reconcile after installing the model). Manual because it is heavy.
 
 ## Vector channel (same vectors as ctx-semantic)
 
@@ -209,9 +235,11 @@ pytest            # 8 tests: store / dual-channel recall / soft delete / RRF mat
 - [x] Phase 2: opencode v2 plugin, four hook families (inject / pre-compaction flush
       / explicit remember / tool whitelist)
 - [x] Phase 3a: multi-harness adapters (`adapters/` — Claude Code, Kimi Code, Codex template)
-- [ ] Phase 3b: semantic-level
-      auto-capture for chat.message, bigram channel for 2-char CJK terms (trigger:
-      a real recall miss in BM25-only mode), cross-project memory graph
+- [x] Phase 3b: lifecycle maintenance — ingest dedup, TTL/purge/VACUUM, vector
+      backfill (startup hook + CLI, deliberately off the MCP tool surface)
+- [ ] Phase 3c: semantic-level auto-capture for chat.message, bigram channel for
+      2-char CJK terms (trigger: a real recall miss in BM25-only mode),
+      cross-project memory graph, memory archive (cold file)
 
 ## Acknowledgments
 
