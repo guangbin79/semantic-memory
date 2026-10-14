@@ -150,6 +150,37 @@ async def api_forget(request: Request) -> JSONResponse:
     return JSONResponse({"uid": uid, "forgotten": store.forget(uid)})
 
 
+# ---------------- 批量维护（双闸门：必须配置 token + 请求鉴权） ----------------
+# 默认无 token 的回环安装下，HTTP 面对本机进程（含 agent shell）是开放的，
+# 因此批量破坏性操作此时仅 CLI 可达（403）；配置 token 后才对持票人开放。
+
+def _bulk_guard(request: Request) -> JSONResponse | None:
+    if cfg.token is None:
+        return JSONResponse(
+            {"error": "bulk maintenance disabled without MEMORY_TOKEN; use the CLI"},
+            status_code=403,
+        )
+    if not _authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    return None
+
+
+@mcp.custom_route("/api/maintenance/purge", methods=["POST"])
+async def api_maintenance_purge(request: Request) -> JSONResponse:
+    guard = _bulk_guard(request)
+    if guard:
+        return guard
+    return JSONResponse(run_maintenance(store, ttl_artifact_days=cfg.ttl_artifact_days))
+
+
+@mcp.custom_route("/api/maintenance/backfill", methods=["POST"])
+async def api_maintenance_backfill(request: Request) -> JSONResponse:
+    guard = _bulk_guard(request)
+    if guard:
+        return guard
+    return JSONResponse(backfill_vectors(store, embedder))
+
+
 @mcp.custom_route("/recall", methods=["POST"])
 async def rest_recall(request: Request) -> JSONResponse:
     if not _authorized(request):

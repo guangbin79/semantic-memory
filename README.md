@@ -178,11 +178,19 @@ hook-facing `/recall` `/ingest`, same auth rule: Bearer when `MEMORY_TOKEN` is s
 | `GET /api/stats` | Totals, vectorized count, db size, embedder/device |
 | `GET /api/memories?kind=&project=&limit=&offset=` | Paginated browse, newest-updated first |
 | `DELETE /api/memories/{uid}` | Single-entry forget (same trust level as the CLI) |
+| `POST /api/maintenance/purge` | Bulk maintenance (soft-delete purge + TTL + VACUUM) |
+| `POST /api/maintenance/backfill` | Vector backfill for vectorless entries |
+
+Bulk-maintenance endpoints sit behind a **double gate**: they return `403`
+unless `MEMORY_TOKEN` is configured (on a default no-token loopback install the
+HTTP surface is open to every local process — including the agent's shell — so
+there the capability stays CLI-only), and `401` without a valid Bearer token.
+The browse page exposes both as buttons (confirm → report → stats refresh).
 
 Open `http://127.0.0.1:8765/` for stats overview, RRF search, kind/project
-filtering, and single-entry forgetting. Scope is deliberately read-mostly:
-observability is what makes "relevance is never lost" believable — but there is
-no bulk editing here; destructive batch operations stay on the startup hook / CLI.
+filtering, single-entry forgetting, and (on token-secured installs) one-click
+maintenance. There is still no bulk editing; observability is what makes
+"relevance is never lost" believable.
 
 ## Maintenance & lifecycle
 

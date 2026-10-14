@@ -40,12 +40,19 @@ INDEX_HTML = """<!DOCTYPE html>
   .meta { color: #8b949e; font-size: 11px; white-space: nowrap; }
   .score { color: #3fb950; font-size: 11px; }
   #status { color: #8b949e; font-size: 12px; margin: 8px 0; }
+  .maint { margin-bottom: 16px; display: flex; gap: 8px; align-items: center; }
+  #maint-status { color: #3fb950; font-size: 12px; }
 </style>
 </head>
 <body>
 <h1>semantic-memory</h1>
 <div class="sub">上下文相关性侧车 · 本地浏览（只读 + 单条遗忘）</div>
 <div class="stats" id="stats"></div>
+<div class="maint">
+  <button class="ghost" id="btn-purge">运行清理（purge）</button>
+  <button class="ghost" id="btn-backfill">向量补嵌（backfill）</button>
+  <span id="maint-status"></span>
+</div>
 <form id="f">
   <input id="q" placeholder="检索（走服务端混合召回 RRF）…">
   <select id="kind"><option value="">全部 kind</option>
@@ -126,6 +133,25 @@ async function search(q) {
 async function refresh() { await loadStats(); await recent(); }
 $('f').onsubmit = e => { e.preventDefault(); $('q').value.trim() ? search($('q').value.trim()) : recent(); };
 $('recent').onclick = recent;
+
+async function maintain(path, label, confirmText) {
+  if (!confirm(confirmText)) return;
+  $('maint-status').textContent = label + ' 运行中…';
+  try {
+    const r = await api(path, {method: 'POST'});
+    if (r.error) { $('maint-status').textContent = r.error; return; }
+    $('maint-status').textContent = label + ' 完成：' + JSON.stringify(r);
+    refresh();
+  } catch (e) {
+    $('maint-status').textContent = label + ' 失败：' + e.message +
+      '（未配置 MEMORY_TOKEN 时批量维护仅 CLI 可用）';
+  }
+}
+$('btn-purge').onclick = () => maintain('/api/maintenance/purge', 'purge',
+  '硬删软删除条目 + TTL 清理 + VACUUM。确认执行？');
+$('btn-backfill').onclick = () => maintain('/api/maintenance/backfill', 'backfill',
+  '为所有缺向量条目补算嵌入（可能耗时）。确认执行？');
+
 refresh().catch(e => $('status').textContent = '服务不可达：' + e.message);
 </script>
 </body>

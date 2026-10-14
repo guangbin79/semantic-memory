@@ -158,11 +158,17 @@ cp opencode-plugin/memory.ts ~/.config/opencode/plugins/
 | `GET /api/stats` | 总量、向量化数、库体积、嵌入通道/设备 |
 | `GET /api/memories?kind=&project=&limit=&offset=` | 分页浏览，按更新时间倒序 |
 | `DELETE /api/memories/{uid}` | 单条遗忘（与 CLI 同信任级） |
+| `POST /api/maintenance/purge` | 批量维护（软删除硬清 + TTL + VACUUM） |
+| `POST /api/maintenance/backfill` | 向量补嵌 |
+
+批量维护端点走**双闸门**：未配置 `MEMORY_TOKEN` 一律 `403`（默认无 token
+的回环安装下，HTTP 面对本机所有进程——包括 agent 的 shell——都是开放的，
+此时该能力仅 CLI 可达）；持错票/无票 `401`。浏览页把两个操作做成按钮
+（确认 → 报告 → 统计刷新）。
 
 浏览器打开 `http://127.0.0.1:8765/` 即可查看统计总览、RRF 检索、
-kind/project 过滤和单条遗忘。功能刻意保持只读为主：可观测性让
-"相关性不丢失"可被验证——但这里没有批量编辑，破坏性批量操作依旧
-只走启动钩子/CLI。
+kind/project 过滤、单条遗忘，以及（在安全安装下）一键维护。
+仍然没有批量编辑——可观测性让"相关性不丢失"可被验证。
 
 ## 维护与生命周期
 
