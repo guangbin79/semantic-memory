@@ -95,6 +95,24 @@ cp opencode-plugin/memory.ts ~/.config/opencode/plugins/
 | `MEMORY_PLUGIN_BUDGET_CHARS` | `2000` | 注入块字符预算 |
 | `MEMORY_PLUGIN_TOOL_CAPTURE` | 空 | 工具捕获白名单（逗号分隔），如 `gis,bash` |
 | `MEMORY_PLUGIN_AUTOSTART` | `0` | `=1` 时服务未启动则自动 spawn |
+| `MEMORY_PLUGIN_DEBUG` | `0` | `=1` 打印 ctx 形态与解析后配置 |
+
+每个 `MEMORY_PLUGIN_*` 变量都有一个插件 options 孪生键（`url`、`token`、
+`limit`、`budget_chars`、`tool_capture`、`autostart`、`debug`），因此也可以
+直接在 `opencode.json` 的插件声明处配置——优先级：**环境变量 > 插件
+options > 默认值**：
+
+```jsonc
+{
+  "plugin": [
+    ["file:///path/to/semantic-memory-mcp/opencode-plugin",
+     { "url": "http://127.0.0.1:9000", "limit": 8, "tool_capture": ["bash", "gis"] }]
+  ]
+}
+```
+
+dev 运行时（`0.0.0-dev-*`）把元组第二元素透传给 `server(ctx, options)`
+（已端到端实测）；stable 2.x 运行时则以 `ctx.options` 暴露同一张表。
 
 ## 随机端口与 agent 自举
 

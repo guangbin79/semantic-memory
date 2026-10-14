@@ -226,4 +226,20 @@ assert.ok(larts.memories.some((m) => m.content.includes("xyz123")), "legacy 工�
 assert.ok(!larts.memories.some((m) => m.content.includes("should not")), "legacy 非白名单不应捕获");
 console.log("ok  legacy tool.execute.after: 白名单捕获，非白名单跳过");
 
-console.log("\n全部 mock-ctx 钩子集成测试通过（stable + legacy 两线）");
+// ---------- 插件 options：优先级 env > options > 默认 ----------
+
+const OPTPROJ = "/tmp/mockproj-options";
+// options.url 故意写错：env MEMORY_PLUGIN_URL 正确 → 召回应成功（env 优先）；
+// options.limit=1：env 未设 MEMORY_PLUGIN_LIMIT → options 补空缺（应生效）。
+const octx = { client: {}, project: { id: "p3", directory: OPTPROJ }, directory: OPTPROJ, worktree: OPTPROJ };
+const ohooks = await plugin.server(octx, { url: "http://127.0.0.1:1", limit: 1 });
+await post("/ingest", { content: "options 验证条目甲 共同点标记", kind: "fact", source: "test", project: OPTPROJ, tags: [] });
+await post("/ingest", { content: "options 验证条目乙 共同点标记", kind: "fact", source: "test", project: OPTPROJ, tags: [] });
+const oout = { parts: [{ type: "text", text: "共同点标记" }] };
+await ohooks["chat.message"]({}, oout);
+assert.equal(oout.parts.length, 2, "options: env URL 优先，召回应成功注入");
+const dashLines = (oout.parts[1].text.match(/^- /gm) ?? []).length;
+assert.equal(dashLines, 1, "options limit:1 应只注入一条（两条候选命中）");
+console.log("ok  插件 options: env 优先于 options，options 补空缺（limit=1 生效）");
+
+console.log("\n全部 mock-ctx 钩子集成测试通过（stable + legacy 两线 + options）");

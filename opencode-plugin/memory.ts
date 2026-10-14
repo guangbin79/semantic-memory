@@ -5,13 +5,19 @@
  * 依赖：零运行时依赖（仅用 fetch/AbortSignal，类型来自 @opencode/plugin）。
  *
  * 配套服务：memory-mcp（Python FastMCP），默认 http://127.0.0.1:8765
- * 配置（环境变量）：
- *   MEMORY_PLUGIN_URL           服务地址，默认 http://127.0.0.1:8765
- *   MEMORY_PLUGIN_TOKEN         与服务端 MEMORY_TOKEN 对应（可空）
- *   MEMORY_PLUGIN_LIMIT         每次召回条数，默认 5
- *   MEMORY_PLUGIN_BUDGET_CHARS  注入块字符预算，默认 2000（≈500 tokens）
- *   MEMORY_PLUGIN_TOOL_CAPTURE  tool execute.after 捕获白名单（逗号分隔，默认空=关闭）
- *   MEMORY_PLUGIN_AUTOSTART     =1 时服务未启动则尝试 spawn `memory-mcp`
+ * 配置（两条通道，优先级：环境变量 > 插件 options > 默认值）：
+ *   环境变量          插件 options 键    说明
+ *   MEMORY_PLUGIN_URL           url           服务地址，默认 http://127.0.0.1:8765
+ *   MEMORY_PLUGIN_TOKEN         token         与服务端 MEMORY_TOKEN 对应（可空）
+ *   MEMORY_PLUGIN_LIMIT         limit         每次召回条数，默认 5
+ *   MEMORY_PLUGIN_BUDGET_CHARS  budget_chars  注入块字符预算，默认 2000（≈500 tokens）
+ *   MEMORY_PLUGIN_TOOL_CAPTURE  tool_capture  tool execute.after 捕获白名单
+ *                                            （数组或逗号分隔，默认空=关闭）
+ *   MEMORY_PLUGIN_AUTOSTART     autostart     =1/true 时服务未启动则尝试 spawn `memory-mcp`
+ *   MEMORY_PLUGIN_DEBUG         debug         =1/true 打印 ctx 形态与解析后配置
+ * 插件 options 写法（opencode.json 元组声明，dev 运行时实测透传）：
+ *   "plugin": [["file:///path/to/opencode-plugin", {"url": "http://127.0.0.1:9000", "limit": 8}]]
+ * stable 运行时（@opencode/plugin 2.x）则从 ctx.options 读取同一张表。
  *
  * 设计约束（勿破坏）：
  * 1. 插件零智能——检索/嵌入/存储全在服务端，这里只做转发与降级；
@@ -29,14 +35,51 @@
  */
 import { Plugin } from "@opencode/plugin";
 
-const URL_BASE = (process.env.MEMORY_PLUGIN_URL ?? "http://127.0.0.1:8765").replace(/\/$/, "");
-const TOKEN = process.env.MEMORY_PLUGIN_TOKEN ?? "";
-const LIMIT = Number(process.env.MEMORY_PLUGIN_LIMIT ?? 5);
-const BUDGET = Number(process.env.MEMORY_PLUGIN_BUDGET_CHARS ?? 2000);
-const TOOL_CAPTURE = new Set(
-  (process.env.MEMORY_PLUGIN_TOOL_CAPTURE ?? "").split(",").map((s) => s.trim()).filter(Boolean),
-);
-const AUTOSTART = process.env.MEMORY_PLUGIN_AUTOSTART === "1";
+interface PluginCfg {
+  url: string;
+  token: string;
+  limit: number;
+  budget: number;
+  toolCapture: Set<string>;
+  autostart: boolean;
+  debug: boolean;
+}
+
+/** 模块级配置：先入环境变量，setup 时再用插件 options 补空缺（env 优先）。 */
+const cfg: PluginCfg = {
+  url: (process.env.MEMORY_PLUGIN_URL ?? "http://127.0.0.1:8765").replace(/\/$/, ""),
+  token: process.env.MEMORY_PLUGIN_TOKEN ?? "",
+  limit: Number(process.env.MEMORY_PLUGIN_LIMIT ?? 5),
+  budget: Number(process.env.MEMORY_PLUGIN_BUDGET_CHARS ?? 2000),
+  toolCapture: new Set(
+    (process.env.MEMORY_PLUGIN_TOOL_CAPTURE ?? "").split(",").map((s) => s.trim()).filter(Boolean),
+  ),
+  autostart: process.env.MEMORY_PLUGIN_AUTOSTART === "1",
+  debug: process.env.MEMORY_PLUGIN_DEBUG === "1",
+};
+
+function truthy(v: unknown): boolean {
+  return v === true || v === 1 || v === "1" || v === "true";
+}
+
+/**
+ * 应用插件 options（dev 线：server(ctx, options) 第二参，来自 opencode.json
+ * 元组声明；stable 线：ctx.options）。只补环境变量未覆盖的键——env 优先。
+ */
+function applyOptions(o: Record<string, unknown> | undefined): void {
+  if (!o || typeof o !== "object") return;
+  const env = process.env;
+  if (o.url !== undefined && !env.MEMORY_PLUGIN_URL) cfg.url = String(o.url).replace(/\/$/, "");
+  if (o.token !== undefined && !env.MEMORY_PLUGIN_TOKEN) cfg.token = String(o.token);
+  if (o.limit !== undefined && !env.MEMORY_PLUGIN_LIMIT) cfg.limit = Number(o.limit);
+  if (o.budget_chars !== undefined && !env.MEMORY_PLUGIN_BUDGET_CHARS) cfg.budget = Number(o.budget_chars);
+  if (o.tool_capture !== undefined && !env.MEMORY_PLUGIN_TOOL_CAPTURE) {
+    const raw = Array.isArray(o.tool_capture) ? o.tool_capture : String(o.tool_capture).split(",");
+    cfg.toolCapture = new Set(raw.map((s) => String(s).trim()).filter(Boolean));
+  }
+  if (o.autostart !== undefined && !env.MEMORY_PLUGIN_AUTOSTART) cfg.autostart = truthy(o.autostart);
+  if (o.debug !== undefined && !env.MEMORY_PLUGIN_DEBUG) cfg.debug = truthy(o.debug);
+}
 
 const TIMEOUT_MS = 1500;
 
@@ -44,11 +87,11 @@ const TIMEOUT_MS = 1500;
 
 async function post(path: string, body: unknown): Promise<any | null> {
   try {
-    const res = await fetch(`${URL_BASE}${path}`, {
+    const res = await fetch(`${cfg.url}${path}`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        ...(TOKEN ? { authorization: `Bearer ${TOKEN}` } : {}),
+        ...(cfg.token ? { authorization: `Bearer ${cfg.token}` } : {}),
       },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(TIMEOUT_MS),
@@ -64,12 +107,12 @@ let serviceChecked = false;
 async function ensureService(): Promise<boolean> {
   if (serviceChecked) return true;
   try {
-    const res = await fetch(`${URL_BASE}/health`, { signal: AbortSignal.timeout(TIMEOUT_MS) });
+    const res = await fetch(`${cfg.url}/health`, { signal: AbortSignal.timeout(TIMEOUT_MS) });
     serviceChecked = res.ok;
   } catch {
     serviceChecked = false;
   }
-  if (!serviceChecked && AUTOSTART) {
+  if (!serviceChecked && cfg.autostart) {
     try {
       const { spawn } = await import("node:child_process");
       spawn("memory-mcp", [], { detached: true, stdio: "ignore" }).unref();
@@ -99,7 +142,7 @@ function formatBlock(hits: Hit[]): string {
   let used = out.length;
   for (const h of hits) {
     const line = `- [${h.kind}] ${h.content}${h.project ? ` (project: ${h.project})` : ""}\n`;
-    if (used + line.length > BUDGET) break;
+    if (used + line.length > cfg.budget) break;
     out += line;
     used += line.length;
   }
@@ -170,7 +213,7 @@ type StableCtx = Parameters<Parameters<typeof Plugin.define>[0]["setup"]>[0];
 async function recallBlock(query: string, project: string | undefined): Promise<string | null> {
   if (!(await ensureService())) return null;
   if (!query) return null;
-  const res = await post("/recall", { query: query.slice(0, 2000), limit: LIMIT, project });
+  const res = await post("/recall", { query: query.slice(0, 2000), limit: cfg.limit, project });
   const hits: Hit[] = res?.hits ?? [];
   if (!hits.length) return null;
   const hash = hashOf(hits.map((h) => h.uid));
@@ -188,15 +231,18 @@ async function recallBlock(query: string, project: string | undefined): Promise<
  *   返回 v1 风格钩子映射（chat.message / experimental.session.compacting /
  *   tool.execute.after）。
  */
-async function control(ctx: StableCtx): Promise<Record<string, unknown> | void> {
+async function control(ctx: StableCtx, options?: Record<string, unknown>): Promise<Record<string, unknown> | void> {
     const c: any = ctx;
+    // 插件 options：dev 线来自 server() 第二参；stable 线来自 ctx.options
+    applyOptions(options ?? (c?.options as Record<string, unknown> | undefined));
     const project: string | undefined =
       c?.location?.project?.directory ?? c?.location?.directory
       ?? c?.project?.directory ?? c?.directory ?? c?.worktree ?? c?.project?.id ?? undefined;
-    if (process.env.MEMORY_PLUGIN_DEBUG === "1") {
+    if (cfg.debug) {
       console.log("[semantic-memory] ctx keys:", JSON.stringify(Object.keys(c ?? {})),
         "line:", typeof c?.session?.hook === "function" ? "stable" : "legacy",
-        "project:", project);
+        "project:", project,
+        "cfg:", JSON.stringify({ ...cfg, toolCapture: [...cfg.toolCapture] }));
     }
 
     // ===== stable 线：v2 类型化钩子 =====
@@ -235,7 +281,7 @@ async function control(ctx: StableCtx): Promise<Record<string, unknown> | void> 
       /** 工具产物捕获（白名单制，默认关闭）。例：MEMORY_PLUGIN_TOOL_CAPTURE=gis,bash */
       await ctx.tool.hook("execute.after", async (event) => {
         if (event.status !== "completed") return;
-        if (!TOOL_CAPTURE.has(event.tool) || !(await ensureService())) return;
+        if (!cfg.toolCapture.has(event.tool) || !(await ensureService())) return;
         const content = event.result?.content;
         const raw = typeof content === "string"
           ? content
@@ -264,7 +310,7 @@ async function control(ctx: StableCtx): Promise<Record<string, unknown> | void> 
       /** 工具产物捕获：output.output 为字符串结果。 */
       "tool.execute.after": async (input: any, output: any) => {
         const name: string = input?.tool ?? "";
-        if (!TOOL_CAPTURE.has(name) || !(await ensureService())) return;
+        if (!cfg.toolCapture.has(name) || !(await ensureService())) return;
         await captureTool(name, String(output?.output ?? ""), project);
       },
     };
@@ -272,9 +318,11 @@ async function control(ctx: StableCtx): Promise<Record<string, unknown> | void> 
 
 /**
  * 双形态导出：
- * - stable 线（@opencode/plugin 2.x 运行时）：读取 { id, setup }；
+ * - stable 线（@opencode/plugin 2.x 运行时）：读取 { id, setup }，
+ *   插件 options 经 ctx.options 传入；
  * - dev 线（0.0.0-dev-* 运行时）：要求 default export 带 server() 方法，
- *   签名为 server(ctx, options)，但 ctx 实为 v1 形态（control 内自动检测）。
+ *   签名为 server(ctx, options)，options 来自 opencode.json 元组声明第二元素，
+ *   ctx 实为 v1 形态（control 内自动检测）。
  * 两种运行时各取所需，多余的键对彼此均为惰性。
  */
 const plugin = Plugin.define({
@@ -282,4 +330,7 @@ const plugin = Plugin.define({
   setup: async (ctx) => { await control(ctx); },
 });
 
-export default { ...plugin, server: (ctx: StableCtx) => control(ctx) };
+export default {
+  ...plugin,
+  server: (ctx: StableCtx, options?: Record<string, unknown>) => control(ctx, options),
+};

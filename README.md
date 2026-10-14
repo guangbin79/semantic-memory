@@ -107,6 +107,25 @@ Plugin:
 | `MEMORY_PLUGIN_BUDGET_CHARS` | `2000` | Injection block character budget |
 | `MEMORY_PLUGIN_TOOL_CAPTURE` | empty | Tool capture whitelist (comma-separated), e.g. `gis,bash` |
 | `MEMORY_PLUGIN_AUTOSTART` | `0` | `=1` spawns the service if unreachable |
+| `MEMORY_PLUGIN_DEBUG` | `0` | `=1` logs ctx shape + resolved config |
+
+Every `MEMORY_PLUGIN_*` variable has a plugin-options twin (`url`, `token`,
+`limit`, `budget_chars`, `tool_capture`, `autostart`, `debug`), so the plugin
+can also be configured right where it is declared in `opencode.json` —
+precedence: **env var > plugin options > default**:
+
+```jsonc
+{
+  "plugin": [
+    ["file:///path/to/semantic-memory-mcp/opencode-plugin",
+     { "url": "http://127.0.0.1:9000", "limit": 8, "tool_capture": ["bash", "gis"] }]
+  ]
+}
+```
+
+The dev runtime (`0.0.0-dev-*`) passes the tuple's second element to
+`server(ctx, options)` (verified end-to-end); the stable 2.x runtime exposes
+the same table as `ctx.options`.
 
 ## Random port & agent bootstrap
 
