@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -73,12 +74,80 @@ CREATE INDEX IF NOT EXISTS idx_memories_kind    ON memories(kind)    WHERE delet
 VALID_KINDS = {"fact", "decision", "preference", "artifact"}
 
 
+class _SerializedCursor:
+    """急切物化的游标：execute 时在锁内 fetchall，之后无锁读取也安全。
+
+    本项目的全部调用点只使用 fetchone（单次）/fetchall/迭代/rowcount，
+    因此物化包装即可覆盖，不追求 DB-API 完整语义。
+    """
+
+    def __init__(self, cur: sqlite3.Cursor):
+        self._rows = cur.fetchall()
+        self.rowcount = cur.rowcount
+        cur.close()
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+    def fetchall(self) -> list:
+        return self._rows
+
+    def __iter__(self):
+        return iter(self._rows)
+
+
+class _SerializedConn:
+    """单连接的跨线程序列化门面。
+
+    ASGI 服务器（uvicorn / TestClient）会在工作线程里执行同步路由，
+    而 sqlite3 连接默认绑定创建线程（check_same_thread）。门面用 RLock
+    保证：单条语句原子执行并急切物化结果；`with conn:` 事务块整体持锁，
+    多语句事务不会与别的线程交织。
+    """
+
+    def __init__(self, conn: sqlite3.Connection):
+        self._conn = conn
+        self._lock = threading.RLock()
+
+    def execute(self, *args, **kwargs) -> _SerializedCursor:
+        with self._lock:
+            return _SerializedCursor(self._conn.execute(*args, **kwargs))
+
+    def executescript(self, *args, **kwargs) -> None:
+        with self._lock:
+            self._conn.executescript(*args, **kwargs)
+
+    def __enter__(self) -> "_SerializedConn":
+        self._lock.acquire()
+        self._conn.__enter__()
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        try:
+            return self._conn.__exit__(*exc)
+        finally:
+            self._lock.release()
+
+    def commit(self) -> None:
+        with self._lock:
+            self._conn.commit()
+
+    def rollback(self) -> None:
+        with self._lock:
+            self._conn.rollback()
+
+    def close(self) -> None:
+        with self._lock:
+            self._conn.close()
+
+
 class MemoryStore:
     def __init__(self, db_path: Path | str):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(str(self.db_path))
-        self.conn.row_factory = sqlite3.Row
+        raw = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        raw.row_factory = sqlite3.Row
+        self.conn = _SerializedConn(raw)
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.executescript(SCHEMA)
