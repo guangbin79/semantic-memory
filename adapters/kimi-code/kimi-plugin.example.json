@@ -1,0 +1,24 @@
+{
+  "_comment": "打包为 Kimi Code 插件时，本文件置于 .kimi-plugin/plugin.json（仓库根），hook 规则与 config.toml 的 [[hooks]] 同构。安装：/plugins install <仓库地址>。事件名与载荷以 Kimi Code 官方 hooks 文档为准，首次使用请用一个会话验证注入是否生效。",
+
+  "name": "semantic-memory",
+  "version": "0.1.0",
+  "description": "Context-relevance sidecar: model-semantic recall of everything compaction discards (backed by memory-mcp at 127.0.0.1:8765)",
+  "hooks": [
+    {
+      "event": "UserPromptSubmit",
+      "command": "${PLUGIN_ROOT}/adapters/kimi-code/on-prompt.sh",
+      "timeout": 5
+    },
+    {
+      "event": "PreCompact",
+      "command": "${PLUGIN_ROOT}/adapters/kimi-code/pre-compact.sh",
+      "timeout": 5
+    }
+  ],
+  "mcpServers": {
+    "memory": {
+      "url": "http://127.0.0.1:8765/mcp"
+    }
+  }
+}

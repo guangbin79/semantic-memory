@@ -1,0 +1,4 @@
+# Codex MCP 注册（config.toml）。hooks 见 hooks.template.json（需用户信任）。
+
+[mcp_servers.memory]
+url = "http://127.0.0.1:8765/mcp"

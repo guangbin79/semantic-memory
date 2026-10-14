@@ -1,0 +1,35 @@
+{
+  "_comment": "合并进 ~/.claude/settings.json（全局）或项目 .claude/settings.json。路径改为本仓库 adapters/claude-code 的绝对路径。两个脚本需要可执行权限。",
+
+  "mcpServers": {
+    "memory": {
+      "type": "http",
+      "url": "http://127.0.0.1:8765/mcp"
+    }
+  },
+
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/absolute/path/to/semantic-memory-mcp/adapters/claude-code/on-prompt.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/absolute/path/to/semantic-memory-mcp/adapters/claude-code/pre-compact.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

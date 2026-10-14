@@ -148,7 +148,8 @@ pytest            # 8 tests: store / dual-channel recall / soft delete / RRF mat
 - [x] Phase 1: MCP tools + hybrid retrieval + REST sidecar (current state)
 - [x] Phase 2: opencode v2 plugin, four hook families (inject / pre-compaction flush
       / explicit remember / tool whitelist)
-- [ ] Phase 3: Claude Code & Kimi Code adapters (`adapters/`), semantic-level
+- [x] Phase 3a: multi-harness adapters (`adapters/` — Claude Code, Kimi Code, Codex template)
+- [ ] Phase 3b: semantic-level
       auto-capture for chat.message, bigram channel for 2-char CJK terms (trigger:
       a real recall miss in BM25-only mode), cross-project memory graph
 

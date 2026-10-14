@@ -36,7 +36,7 @@ coding agent 上下文管理的**侧车（sidecar）**：提供**模型语义级
 REST 侧车是为**多宿主支持**准备的：任何带生命周期钩子的 agent harness
 （Claude Code、Codex、Kimi Code……）都可以把控制面接成"钩子事件 → curl
 localhost:8765"——只有 opencode v2 需要进程内插件，因为它的钩子在 JS 运行时里。
-各家适配见 `adapters/`（规划中）。
+各家适配见 `adapters/`——Claude Code 与 Kimi Code 为完整适配，Codex 为模板，ZCode/DeepSeek 仅 MCP 说明。
 
 设计约束：插件零智能（检索/嵌入/存储全在服务端）；服务挂了插件静默跳过；注入集合未变不重复注入（保护 prefix cache）；MCP 脱离插件独立可用。
 度量标准不是"省了多少 token"，而是"当前任务所需相关性的召回率"（recall@k）。
@@ -128,7 +128,8 @@ pytest            # 8 项：存储/双通道召回/软删除/RRF 数学/CJK 子�
 
 - [x] 第一期：MCP 工具 + 混合检索 + REST 侧车（本仓库当前状态）
 - [x] 第二期：opencode v2 插件四族钩子（注入 / 压缩前托管 / 显式记忆 / 工具白名单）
-- [ ] 第三期：Claude Code 与 Kimi Code 适配器（`adapters/`）、chat.message 语义级
+- [x] 第三期a：多宿主适配器（`adapters/`——Claude Code、Kimi Code、Codex 模板）
+- [ ] 第三期b：chat.message 语义级
       自动捕获、两字中文词 bigram 通道（触发条件：纯 BM25 模式出现真实漏召回）、
       跨项目记忆图谱
 

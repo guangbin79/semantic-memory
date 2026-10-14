@@ -1,0 +1,18 @@
+# 合并进 ~/.kimi/config.toml（或项目级配置）。路径改为绝对路径。
+# Kimi Code 的 hook 规则字段：event / matcher / command / timeout。
+
+# MCP 数据面：memory_store / memory_recall / memory_forget / memory_list / memory_stats
+[mcp_servers.memory]
+url = "http://127.0.0.1:8765/mcp"
+
+# 控制面钩子一：用户提交 → 召回注入 + 显式记忆捕获
+[[hooks]]
+event = "UserPromptSubmit"
+command = "/absolute/path/to/semantic-memory-mcp/adapters/kimi-code/on-prompt.sh"
+timeout = 5
+
+# 控制面钩子二：压缩前 → 记忆托管
+[[hooks]]
+event = "PreCompact"
+command = "/absolute/path/to/semantic-memory-mcp/adapters/kimi-code/pre-compact.sh"
+timeout = 5
