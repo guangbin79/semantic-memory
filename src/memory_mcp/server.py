@@ -69,7 +69,10 @@ def memory_recall(
     project: str | None = None,
 ) -> list[dict]:
     """混合检索相关记忆，按 RRF 分数降序。"""
-    return hybrid_recall(store, embedder, query, limit, project, rrf_k=cfg.rrf_k)
+    return hybrid_recall(
+        store, embedder, query, limit, project, rrf_k=cfg.rrf_k,
+        inject_boost=cfg.inject_boost, min_cosine=cfg.recall_min_cosine,
+    )
 
 
 @mcp.tool
@@ -222,6 +225,7 @@ async def rest_recall(request: Request) -> JSONResponse:
         limit=int(body.get("limit", cfg.recall_limit_default)),
         project=body.get("project"),
         rrf_k=cfg.rrf_k,
+        inject_boost=cfg.inject_boost, min_cosine=cfg.recall_min_cosine,
     )
     return JSONResponse({"hits": hits})
 

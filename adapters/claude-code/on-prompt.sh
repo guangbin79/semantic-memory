@@ -18,7 +18,8 @@ if [ -n "$MEM" ]; then
   bash "$COMMON/ingest.sh" "$CLEAN" "preference" "chat" &
 fi
 
-# 2. 召回注入
+# 2. 召回注入（带上 harness/hook 标识用于注入遥测）
+MEMORY_HARNESS="${MEMORY_HARNESS:-claude-code}" MEMORY_HOOK="prompt" \
 BLOCK=$(bash "$COMMON/recall.sh" "$PROMPT")
 [ -z "$BLOCK" ] && exit 0
 

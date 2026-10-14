@@ -477,6 +477,21 @@ class MemoryStore:
         args += [limit, offset]
         return [dict(r) for r in self.conn.execute(sql, args)]
 
+    def injection_counts(self, uids: list[str]) -> dict[str, int]:
+        """给定 uid 集合的历史注入次数（遥测反哺排序用）。"""
+        if not uids:
+            return {}
+        marks = ",".join("?" * len(uids))
+        return {
+            r["value"]: r["c"]
+            for r in self.conn.execute(
+                f"SELECT j.value, COUNT(*) c FROM injections,"
+                f" json_each(injections.uids) j WHERE j.value IN ({marks})"
+                f" GROUP BY j.value",
+                uids,
+            )
+        }
+
     def purge_injections_before(self, cutoff_ts: float) -> int:
         cur = self.conn.execute("DELETE FROM injections WHERE ts < ?", (cutoff_ts,))
         self.conn.commit()

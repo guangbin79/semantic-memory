@@ -120,6 +120,8 @@ cp opencode-plugin/memory.ts ~/.config/opencode/plugins/
 | `MEMORY_DISCOVERY_FILE` | `<db>.server.json` | 服务发现文件；`off` = 关闭 |
 | `MEMORY_TOKEN` | 空 | REST 侧车 Bearer 鉴权；绑非回环地址时**必配** |
 | `MEMORY_RRF_K` | `60` | RRF 融合常数 |
+| `MEMORY_RECALL_MIN_COSINE` | `0.45` | 纯向量命中的余弦门限（BM25 命中恒放行）；`0` = 关闭 |
+| `MEMORY_INJECT_BOOST` | `0.15` | 遥测反哺：score × (1 + α·ln(1+注入次数))；`0` = 关闭 |
 | `MEMORY_TTL_ARTIFACT_DAYS` | `90` | `artifact` 类 TTL 天数；`0` = 不过期 |
 | `MEMORY_TTL_INJECTION_DAYS` | `90` | 注入遥测流水 TTL 天数；`0` = 不过期 |
 | `MEMORY_MAINTENANCE_ON_START` | `1` | 服务启动时运行维护例程 |
@@ -253,9 +255,30 @@ kind/project 过滤、单条遗忘，以及（在安全安装下）一键维护�
 上报（fire-and-forget）：harness、钩子、触发查询、注入的记忆 uid、
 块大小。浏览页据此呈现供给侧图景：累计/近 7 天注入次数、累计字符
 （附 ÷4 的 token 粗估）、按 harness/钩子分布、**反复被注入的记忆
-Top10**、最近 20 次注入流水。这里度量的是"供给了什么"——模型是否
-采纳不可度量，也刻意不做伪精确。遥测流水按
+Top10**、最近 20 次注入流水。shell 适配器（Claude Code / Kimi Code）
+同样上报——`recall.sh` 在输出注入块后 fire-and-forget 调 `/inject/report`，
+用 `MEMORY_HARNESS` / `MEMORY_HOOK` 标记来源。这里度量的是"供给了
+什么"——模型是否采纳不可度量，也刻意不做伪精确。遥测流水按
 `MEMORY_TTL_INJECTION_DAYS`（默认 90 天）过期清理。
+
+**上下文卫生。** 记忆内容是不可信数据，最终会进入 prompt。每个注入块都
+带有明确的"参考资料而非指令"声明，且内容里出现的 `<semantic-memory>`
+边界标签会被剥除——已存条目无法逃逸包裹。写入侧，工具产物捕获会跳过
+命中典型 prompt-injection 模式（"ignore all previous instructions"、
+"忽略…指令"、`<system>` 等）的产物，避免被污染的工具结果经记忆库
+回流到后续会话。
+
+## 排序后处理（实测取值，不是拍的）
+
+RRF 只编码名次，不编码相关强度——"无相关里的最近邻"也会得分。两个
+融合后的处理步骤，均默认开启：
+
+- **余弦门限**（`MEMORY_RECALL_MIN_COSINE=0.45`）：纯向量命中低于门限
+  丢弃；BM25 命中恒放行（token 命中本身就是证据）。门限来自真实模型
+  实测：相关命中 ~0.68，无关 ~0.28-0.31。
+- **遥测反哺**（`MEMORY_INJECT_BOOST=0.15`）：被真实注入过的记忆
+  score × (1 + α·ln(1+注入次数))。对数抑制富者愈富；注入 2 次即可
+  翻转相邻名次。
 
 ## 维护与生命周期
 
@@ -305,16 +328,19 @@ GPU 运行期嵌入失败（如 OOM）自动 CPU 重建重试一次。无 NVIDIA
 
 ```bash
 pip install -e ".[dev]"
-pytest            # 39 项：存储/双通道召回/软删除/RRF 数学/CJK 子串/查询前缀约定/
+pytest            # 43 项：存储/双通道召回/软删除/RRF 数学/CJK 子串/查询前缀约定/
                   # 容错/生命周期去重与 TTL/迁移/REST 与 /api 路由/
                   # 批量双闸门鉴权/MCP 工具层/随机端口与服务发现/
-                  # 注入遥测（上报/聚合/TTL/鉴权）
+                  # 注入遥测（上报/聚合/TTL/鉴权）/
+                  # 排序后处理（余弦门限、遥测反哺）/
+                  # 真实模型向量端到端（MEMORY_MODEL_PATH 可选启用）
 
 cd opencode-plugin
 npm install       # 然后：
 npm run typecheck # tsc --strict，类型基线 @opencode/plugin 2.0.28
-npm test          # 构建 + 19 项 mock-ctx 钩子断言（打真实服务；
-                  # stable 线：注入/去重/显式记忆/压缩托管/工具捕获/遥测上报；
+npm test          # 构建 + 37 项 mock-ctx 钩子断言（打真实服务；
+                  # stable 线：注入/去重/显式记忆/压缩托管/工具捕获/遥测上报/
+                  # 捕获卫生/边界标签消毒；
                   # legacy 线：v1 钩子映射、synthetic part、compacting 重置、遥测上报；
                   # options：env 优先、缺省补位）
 ```

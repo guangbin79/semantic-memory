@@ -16,6 +16,7 @@ if [ -n "$MEM" ]; then
   bash "$COMMON/ingest.sh" "$CLEAN" "preference" "chat" &
 fi
 
+MEMORY_HARNESS="${MEMORY_HARNESS:-kimi-code}" MEMORY_HOOK="prompt" \
 BLOCK=$(bash "$COMMON/recall.sh" "$PROMPT")
 [ -z "$BLOCK" ] && exit 0
 

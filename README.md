@@ -132,6 +132,8 @@ Service:
 | `MEMORY_DISCOVERY_FILE` | `<db>.server.json` | Service-discovery file; `off` = disabled |
 | `MEMORY_TOKEN` | empty | REST sidecar Bearer auth; **required** when binding non-loopback |
 | `MEMORY_RRF_K` | `60` | RRF fusion constant |
+| `MEMORY_RECALL_MIN_COSINE` | `0.45` | Cosine floor for vector-only hits (BM25 hits always pass); `0` = off |
+| `MEMORY_INJECT_BOOST` | `0.15` | Telemetry feedback: score × (1 + α·ln(1+injections)); `0` = off |
 | `MEMORY_TTL_ARTIFACT_DAYS` | `90` | TTL for `artifact` kind; `0` = never expire |
 | `MEMORY_TTL_INJECTION_DAYS` | `90` | TTL for injection telemetry; `0` = never expire |
 | `MEMORY_MAINTENANCE_ON_START` | `1` | Run the maintenance routine at service startup |
@@ -280,9 +282,20 @@ injection to `POST /inject/report` (fire-and-forget): harness, hook, trigger
 query, memory uids, block size. The browse page shows the supply-side picture:
 total/7-day injection counts, characters (with a rough ÷4 token estimate),
 per-harness/per-hook distribution, the **Top10 most-injected memories**, and
-the 20 most recent injections. This measures what was *supplied* — whether the
-model *used* it is not measurable and deliberately not faked. Telemetry rows
-expire after `MEMORY_TTL_INJECTION_DAYS` (default 90).
+the 20 most recent injections. The shell adapters (Claude Code / Kimi Code)
+report the same way — `recall.sh` fires the report after emitting a block,
+tagged via `MEMORY_HARNESS` / `MEMORY_HOOK`. This measures what was *supplied* —
+whether the model *used* it is not measurable and deliberately not faked.
+Telemetry rows expire after `MEMORY_TTL_INJECTION_DAYS` (default 90).
+
+**Context hygiene.** Memory content is untrusted data that ends up inside a
+prompt. Every injected block carries an explicit "reference data, not
+instructions" notice, and any `<semantic-memory>` boundary tags inside the
+content itself are stripped so a stored entry cannot break out of its wrapper.
+On the write side, tool-output capture skips artifacts matching classic
+prompt-injection patterns ("ignore all previous instructions", "忽略…指令",
+`<system>`, …) so a poisoned tool result cannot re-enter later sessions through
+the memory store.
 
 ## Maintenance & lifecycle
 
@@ -326,6 +339,19 @@ rebuilds on CPU with a log line; a runtime GPU embed failure (e.g. OOM) rebuilds
 CPU and retries once. On machines without NVIDIA, set `MEMORY_DEVICE=cpu` to skip the
 GPU attempt. `memory_stats` / `/health` report the actual device in use.
 
+## Ranking post-processing (measured, not guessed)
+
+RRF encodes only rank, not relevance strength — "nearest among the irrelevant"
+still earns a score. Two post-fusion steps, both on by default:
+
+- **Cosine floor** (`MEMORY_RECALL_MIN_COSINE=0.45`): vector-only hits below the
+  floor are dropped; BM25 hits always pass (a token match is evidence by
+  itself). The floor is measured on the real model: relevant hits land ~0.68,
+  unrelated ~0.28-0.31.
+- **Telemetry feedback** (`MEMORY_INJECT_BOOST=0.15`): a memory that was
+  actually injected before scores × (1 + α·ln(1+injections)). The log dampens
+  rich-get-richer; 2 prior injections flip an adjacent rank pair.
+
 ## Multilingual full-text search
 
 - The **porter** channel (unicode61 + English stemming) indexes every script with
@@ -343,20 +369,23 @@ channel (~15 lines, zero dependencies) — see the roadmap.
 
 ```bash
 pip install -e ".[dev]"
-pytest            # 39 tests: store / dual-channel recall / soft delete / RRF math /
+pytest            # 43 tests: store / dual-channel recall / soft delete / RRF math /
                   # CJK substring / query-prefix contract / fault tolerance /
                   # lifecycle dedup & TTL / migration / REST & /api routes /
                   # bulk double-gate auth / MCP tool layer /
                   # random-port serve & service discovery /
-                  # injection telemetry (report/aggregation/TTL/auth)
+                  # injection telemetry (report/aggregation/TTL/auth) /
+                  # ranking post-processing (cosine floor, telemetry boost) /
+                  # real-model vector E2E (opt-in via MEMORY_MODEL_PATH)
 
 cd opencode-plugin
 npm install       # then:
 npm run typecheck # tsc --strict against @opencode/plugin 2.0.28 types
-npm test          # build + 19 mock-ctx hook assertions against a live service
+npm test          # build + 37 mock-ctx hook assertions against a live service
                   # (stable line: inject/dedup/remember/compaction/tool-capture/
-                  #  telemetry; legacy line: v1 hook map, synthetic parts,
-                  #  compacting reset, telemetry; options: env wins, gap-filling)
+                  #  telemetry/capture-hygiene/tag-sanitizing; legacy line: v1
+                  #  hook map, synthetic parts, compacting reset, telemetry;
+                  #  options: env wins, gap-filling)
 ```
 
 The plugin is additionally verified against the real opencode dev loader

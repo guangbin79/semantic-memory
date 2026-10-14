@@ -22,6 +22,8 @@ class Config:
     device: str                # cuda（默认）| cpu
     recall_limit_default: int
     rrf_k: int                 # RRF 常数，经典值 60
+    inject_boost: float        # 遥测反哺强度：score × (1 + α·ln(1+注入次数))；0 = 关闭
+    recall_min_cosine: float   # 纯向量命中（无 BM25 支持）的余弦门限；0 = 关闭
     # ---- 生命周期维护（调用面：启动钩子 + CLI，刻意不在 MCP 工具面）----
     ttl_artifact_days: int     # artifact 类 TTL；0 = 不过期
     ttl_injection_days: int    # 注入遥测 TTL；0 = 不过期
@@ -51,6 +53,8 @@ class Config:
             device=os.environ.get("MEMORY_DEVICE", "cuda").lower(),
             recall_limit_default=int(os.environ.get("MEMORY_RECALL_LIMIT", "5")),
             rrf_k=int(os.environ.get("MEMORY_RRF_K", "60")),
+            inject_boost=float(os.environ.get("MEMORY_INJECT_BOOST", "0.15")),
+            recall_min_cosine=float(os.environ.get("MEMORY_RECALL_MIN_COSINE", "0.45")),
             ttl_artifact_days=int(os.environ.get("MEMORY_TTL_ARTIFACT_DAYS", "90")),
             ttl_injection_days=int(os.environ.get("MEMORY_TTL_INJECTION_DAYS", "90")),
             maintenance_on_start=os.environ.get("MEMORY_MAINTENANCE_ON_START", "1") == "1",
