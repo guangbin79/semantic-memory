@@ -1,9 +1,17 @@
 # semantic-memory-mcp
 
-opencode v2 的语义记忆组件：**混合检索记忆服务（数据面）+ 薄插件（控制面）**。
+coding agent 上下文管理的**侧车（sidecar）**：提供**模型语义级**的上下文检索，
+确保上下文相关性不丢失。
 
-- MCP 服务（Python FastMCP）：BM25（FTS5 双通道 porter + trigram）+ 向量（Qwen3-Embedding-0.6B GGUF，可选）+ RRF 融合
+**它的目标不是节省 token、不是压缩上下文。** opencode v2 原生 compaction 和 DCP
+负责上下文"数量"（压缩、修剪、丢弃以适配窗口）；本组件负责上下文"相关性"——
+被压缩掉的、被剪掉的、上一个会话里的一切，都进入语义可检索的仓库，当它与
+**当前任务**相关时被自动找回注入。它花一笔受预算约束的 token（注入块），
+买回本会永久丢失的相关性。压缩让窗口够用，侧车让压缩安全。
+
+- MCP 服务（Python FastMCP）：BM25（FTS5 双通道 porter + trigram）+ 向量（Qwen3-Embedding-0.6B GGUF，可选）+ RRF 融合——检索发生在嵌入空间，措辞不同也能命中
 - v2 插件（`opencode-plugin/memory.ts`）：钩住 context / compaction / generate / chat.message / tool execute.after，让"记"和"忆"自动发生
+- 独立进程、独立模型：不占用主 agent 的窗口与模型，服务宕机会话无感（fail-open）
 
 ## 架构
 
@@ -24,6 +32,7 @@ opencode v2 的语义记忆组件：**混合检索记忆服务（数据面）+ �
 ```
 
 设计约束：插件零智能（检索/嵌入/存储全在服务端）；服务挂了插件静默跳过；注入集合未变不重复注入（保护 prefix cache）；MCP 脱离插件独立可用。
+度量标准不是"省了多少 token"，而是"当前任务所需相关性的召回率"（recall@k）。
 
 ## 快速开始
 
