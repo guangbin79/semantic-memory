@@ -104,6 +104,66 @@ Plugin:
 | `MEMORY_PLUGIN_TOOL_CAPTURE` | empty | Tool capture whitelist (comma-separated), e.g. `gis,bash` |
 | `MEMORY_PLUGIN_AUTOSTART` | `0` | `=1` spawns the service if unreachable |
 
+## Indexing: near-real-time, no rebuild windows
+
+- **FTS (BM25)**: the FTS5 external-content tables are updated by triggers in the
+  **same transaction** as the insert — a memory is keyword-searchable the moment
+  `memory_store` returns.
+- **Vectors**: the embedding is computed **synchronously inside the write request**
+  and stored alongside the row. Retrieval is brute-force cosine over all vectors at
+  query time — there is no ANN structure to build, lag, or ever rebuild.
+- **Cold start**: the embedding model loads lazily on the first embed call
+  (seconds, once per process). That first request blocks on it; nothing is dropped.
+- **Capture is at-most-once**: hooks fire and forget (1.5s budget). Memories that
+  arrive while the service is down are silently dropped — a blocked session is
+  worse than a missed memory. Durability is best-effort, not exactly-once.
+- **Vector gap**: entries written while the embedder is unconfigured stay
+  BM25-searchable only; there is no automatic backfill (a `memory_backfill`
+  admin tool is on the roadmap).
+
+## Storage layout
+
+Everything lives in **one SQLite file** (`MEMORY_DB_PATH`, default
+`~/.local/share/memory-mcp/memory.db`):
+
+| Object | Contents |
+|---|---|
+| `memories` | content + metadata (kind / source / project / tags / timestamps) |
+| `memories_fts`, `memories_fts_tri` | FTS5 inverted indexes (porter / trigram), external-content — text is NOT duplicated |
+| `memories_vec` | vector BLOBs, 1024-dim float32 = 4 KB per entry |
+
+WAL sidecar files (`-wal`, `-shm`) exist at runtime; the GGUF model (~600 MB) is a
+separate file. Deleting the db is a clean full reset — there is no other state.
+Back up with `sqlite3 memory.db ".backup '/path/to/backup.db'"`. Unlike
+ctx-semantic, the vector matrix is read from SQLite per query (the page cache
+carries this to ~50k entries) — zero cache-invalidation logic.
+
+## Sharing model
+
+- **Cross-session**: the index is on disk; sessions are processes. Combined with
+  the pre-compaction flush, even discarded context outlives its session.
+- **Cross-harness**: opencode v2, Claude Code, Kimi Code and Codex all connect to
+  the same service and therefore the **same index** — a memory stored by Claude
+  Code is recallable from opencode. Switching harnesses loses nothing; there is
+  no second copy to sync.
+- **`project` is a filter, not a partition**: the index is global; the plugin
+  filters by current project at injection time, but omitting `project` in
+  `memory_recall` searches everything.
+- **Single user, single machine**: loopback bind + optional Bearer token. No
+  multi-tenancy.
+- **Attribution gap**: `source` records the origin type (chat / compaction /
+  tool) but not which harness wrote the entry — add a `harness:<name>` tag when
+  that query need actually arises.
+
+### Choosing the storage location
+
+`MEMORY_DB_PATH` is read at service startup (parent directories are
+auto-created). One db file per service instance — for hard db-level isolation
+(e.g. a classified project), run multiple instances on different ports and point
+`MEMORY_PLUGIN_URL` at the right one. Do NOT put the live db on NFS/SMB or
+synced folders (WAL locking semantics); use backups for cross-machine movement.
+Until a hard isolation need exists, prefer one instance + `project` filtering.
+
 ## Vector channel (same vectors as ctx-semantic)
 
 The embedding layer mirrors [ctx-semantic](https://github.com/guangbin79/ctx-semantic)

@@ -92,6 +92,58 @@ cp opencode-plugin/memory.ts ~/.config/opencode/plugins/
 | `MEMORY_PLUGIN_TOOL_CAPTURE` | 空 | 工具捕获白名单（逗号分隔），如 `gis,bash` |
 | `MEMORY_PLUGIN_AUTOSTART` | `0` | `=1` 时服务未启动则自动 spawn |
 
+## 索引：接近实时，无重建窗口
+
+- **FTS（BM25）**：FTS5 外部内容表由触发器在**与写入相同的事务**内更新——
+  `memory_store` 返回的那一刻即可被关键词检索。
+- **向量**：嵌入在**写入请求内同步计算**并随行落库。检索是查询时的暴力余弦
+  全扫——不存在需要构建、滞后或重建的 ANN 结构。
+- **冷启动**：嵌入模型在首次嵌入调用时惰性加载（秒级，每进程一次）。
+  该请求会同步等待，但不会丢数据。
+- **捕获是至多一次**：钩子 fire-and-forget（1.5s 预算）。服务宕机期间到达的
+  记忆会被静默丢弃——阻塞会话比漏一条记忆更糟。持久性是 best-effort，
+  不是 exactly-once。
+- **向量空洞**：嵌入器未配置期间写入的条目只有 BM25 可检索；不会自动回向量
+  补嵌（`memory_backfill` 管理工具在路线图上）。
+
+## 存储布局
+
+一切收在**一个 SQLite 文件**里（`MEMORY_DB_PATH`，默认
+`~/.local/share/memory-mcp/memory.db`）：
+
+| 对象 | 内容 |
+|---|---|
+| `memories` | 原文 + 元数据（kind / source / project / tags / 时间戳） |
+| `memories_fts`、`memories_fts_tri` | FTS5 倒排索引（porter / trigram），外部内容表——正文不重复存储 |
+| `memories_vec` | 向量 BLOB：每条 1024 维 float32 = 4KB |
+
+运行期有 WAL 伴生文件（`-wal`、`-shm`）；GGUF 模型（~600MB）是独立文件。
+删除 db 文件即干净的全量重置——没有其他状态。备份用
+`sqlite3 memory.db ".backup '/path/to/backup.db'"`。与 ctx-semantic 不同，
+向量矩阵每次查询从 SQLite 现读（page cache 可撑到 ~50k 条）——
+没有任何缓存失效逻辑。
+
+## 共享模型
+
+- **跨会话**：索引在磁盘上，会话是进程。配合压缩前托管，连被丢弃的上下文
+  也能活过会话边界。
+- **跨 harness**：opencode v2、Claude Code、Kimi Code、Codex 都连同一个服务，
+  即**同一份索引**——Claude Code 存的记忆在 opencode 里可召回。换 harness
+  不丢记忆；没有第二份拷贝需要同步。
+- **project 是过滤器，不是隔离墙**：索引全局唯一；插件注入时按当前项目过滤，
+  但 `memory_recall` 不传 project 就是全库检索。
+- **单用户单机**：回环绑定 + 可选 Bearer token，无多租户。
+- **归因缺口**：`source` 记录来源类型（chat / compaction / tool），但不记录
+  由哪个 harness 写入——出现该查询需求时加 `harness:<name>` 标签即可。
+
+### 指定存储位置
+
+`MEMORY_DB_PATH` 在服务启动时读取（父目录自动创建）。一个库文件对应一个
+服务实例——需要库级硬隔离（如涉密项目）时，跑多个实例、各自端口，用
+`MEMORY_PLUGIN_URL` 指向对应实例。**不要**把活跃库放在 NFS/SMB 或同步盘上
+（WAL 锁语义不可靠）；跨机迁移走备份。在出现硬隔离需求之前，优先用
+单实例 + `project` 过滤。
+
 ## 向量通道（与 ctx-semantic 同源）
 
 嵌入层逐项对齐 [ctx-semantic](https://github.com/guangbin79/ctx-semantic) 的向量与方式，
