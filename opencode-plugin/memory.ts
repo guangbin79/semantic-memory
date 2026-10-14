@@ -210,16 +210,32 @@ type StableCtx = Parameters<Parameters<typeof Plugin.define>[0]["setup"]>[0];
  * 召回 + uid 哈希去重（两条加载线共用核心）。
  * query 为空或召回集合未变时返回 null，否则返回注入块文本。
  */
-async function recallBlock(query: string, project: string | undefined): Promise<string | null> {
+async function recallBlock(query: string, project: string | undefined): Promise<{ block: string; hits: Hit[]; query: string } | null> {
   if (!(await ensureService())) return null;
   if (!query) return null;
-  const res = await post("/recall", { query: query.slice(0, 2000), limit: cfg.limit, project });
+  const q = query.slice(0, 2000);
+  const res = await post("/recall", { query: q, limit: cfg.limit, project });
   const hits: Hit[] = res?.hits ?? [];
   if (!hits.length) return null;
   const hash = hashOf(hits.map((h) => h.uid));
   if (hash === lastInjectHash) return null; // 集合未变，跳过重复注入
   lastInjectHash = hash;
-  return formatBlock(hits);
+  return { block: formatBlock(hits), hits, query: q };
+}
+
+/**
+ * 注入遥测上报（fire-and-forget，绝不阻塞注入链路）。
+ * 召回≠注入——只有注入方知道这次真的注了，由插件上报而非服务端记召回。
+ */
+function reportInjection(hook: string, r: { block: string; hits: Hit[]; query: string }, project: string | undefined): void {
+  void post("/inject/report", {
+    harness: "opencode",
+    hook,
+    query: r.query.slice(0, 500),
+    uids: r.hits.map((h) => h.uid).slice(0, 50),
+    chars: r.block.length,
+    project,
+  });
 }
 
 /**
@@ -247,15 +263,20 @@ async function control(ctx: StableCtx, options?: Record<string, unknown>): Promi
 
     // ===== stable 线：v2 类型化钩子 =====
     if (typeof c?.session?.hook === "function") {
-      /** 召回注入。三个钩子共用同一实现（见文件头约束 3/4）。 */
-      async function inject(event: { system: Array<{ type: "text"; text: string }>; messages: Array<{ role: string; content: unknown }> }) {
-        const block = await recallBlock(recentUserText(event), project);
-        if (block) event.system.push({ type: "text", text: block });
+      /** 召回注入 + 遥测上报。三个钩子共用同一实现（见文件头约束 3/4）。 */
+      function makeInject(hook: string) {
+        return async (event: { system: Array<{ type: "text"; text: string }>; messages: Array<{ role: string; content: unknown }> }) => {
+          const r = await recallBlock(recentUserText(event), project);
+          if (r) {
+            event.system.push({ type: "text", text: r.block });
+            reportInjection(hook, r, project);
+          }
+        };
       }
 
-      await ctx.session.hook("context", inject);
-      await ctx.session.hook("compaction", inject);
-      await ctx.session.hook("generate", inject);
+      await ctx.session.hook("context", makeInject("context"));
+      await ctx.session.hook("compaction", makeInject("compaction"));
+      await ctx.session.hook("generate", makeInject("generate"));
 
       /** 压缩前落库：把将被压缩的用户意图浓缩存入（v2 compaction 丢弃 ≠ 记忆永存）。 */
       await ctx.session.hook("compaction", async (event) => {
@@ -298,9 +319,10 @@ async function control(ctx: StableCtx, options?: Record<string, unknown>): Promi
         if (!(await ensureService())) return;
         const text = partsText(output?.parts ?? output?.message?.content ?? "");
         if (text) await captureRemember(text, project);
-        const block = await recallBlock(text, project);
-        if (block && Array.isArray(output?.parts)) {
-          output.parts.push({ type: "text", text: block, synthetic: true });
+        const r = await recallBlock(text, project);
+        if (r && Array.isArray(output?.parts)) {
+          output.parts.push({ type: "text", text: r.block, synthetic: true });
+          reportInjection("chat.message", r, project);
         }
       },
       /** 压缩：重置注入去重（dev 线拿不到会话文本，托管落库仅 stable 线）。 */

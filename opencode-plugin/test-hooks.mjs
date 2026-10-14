@@ -69,6 +69,18 @@ function userEvent(text) {
   };
 }
 
+// 注入遥测是 fire-and-forget，轮询等待上报落库
+async function waitInjection(project, hook, timeoutMs = 3000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const r = await getJson(`/api/injections?project=${encodeURIComponent(project)}&limit=50`);
+    const hit = r.injections.find((i) => i.hook === hook);
+    if (hit) return hit;
+    await new Promise((r2) => setTimeout(r2, 150));
+  }
+  return null;
+}
+
 // ---------- 测试 ----------
 
 const { hooks, ctx } = makeCtx();
@@ -119,6 +131,13 @@ assert.equal(ev1.system.length, 1, "context 钩子应注入一个 system 块");
 assert.ok(ev1.system[0].text.includes("<semantic-memory>"), "注入块格式错误");
 assert.ok(ev1.system[0].text.includes("release/2026"), "注入块缺少召回内容");
 console.log("ok  context 钩子: 注入块 ->", JSON.stringify(ev1.system[0].text.slice(0, 80)) + "…");
+
+// 注入遥测：context 注入应已上报（harness/hook/uids/chars 齐）
+const inj1 = await waitInjection(PROJECT, "context");
+assert.ok(inj1, "注入遥测: context 注入未上报");
+assert.equal(inj1.harness, "opencode");
+assert.ok(JSON.parse(inj1.uids).length >= 1 && inj1.chars > 0, "遥测字段缺失");
+console.log("ok  注入遥测: context 注入已上报（uids=" + inj1.uids + " chars=" + inj1.chars + "）");
 
 const ev2 = userEvent("部署分支"); // 同查询 → 同召回集合
 await fire(hooks.session, "context", ev2);
@@ -205,6 +224,10 @@ assert.equal(lout1.parts.length, 2, "legacy 注入应追加一个 part");
 assert.ok(lout1.parts[1].synthetic === true, "legacy 注入 part 应标记 synthetic");
 assert.ok(lout1.parts[1].text.includes("<semantic-memory>"), "legacy 注入块格式错误");
 console.log("ok  legacy chat.message: synthetic part 注入正常");
+
+const inj2 = await waitInjection(LPROJECT, "chat.message");
+assert.ok(inj2, "注入遥测: legacy chat.message 注入未上报");
+console.log("ok  注入遥测: legacy chat.message 注入已上报");
 
 // legacy 去重：同集合不重复注入
 const lout2 = { parts: [{ type: "text", text: "显式记忆" }] };

@@ -133,6 +133,7 @@ Service:
 | `MEMORY_TOKEN` | empty | REST sidecar Bearer auth; **required** when binding non-loopback |
 | `MEMORY_RRF_K` | `60` | RRF fusion constant |
 | `MEMORY_TTL_ARTIFACT_DAYS` | `90` | TTL for `artifact` kind; `0` = never expire |
+| `MEMORY_TTL_INJECTION_DAYS` | `90` | TTL for injection telemetry; `0` = never expire |
 | `MEMORY_MAINTENANCE_ON_START` | `1` | Run the maintenance routine at service startup |
 | `MEMORY_DEDUP_SIM` | `0.98` | Cosine threshold for vector near-duplicate ingest dedup |
 
@@ -212,6 +213,7 @@ Everything lives in **one SQLite file** (`MEMORY_DB_PATH`, default
 | `memories` | content + metadata (kind / source / project / tags / timestamps) |
 | `memories_fts`, `memories_fts_tri` | FTS5 inverted indexes (porter / trigram), external-content — text is NOT duplicated |
 | `memories_vec` | vector BLOBs, 1024-dim float32 = 4 KB per entry |
+| `injections` | injection telemetry rows (harness/hook/query/uids/chars) |
 
 WAL sidecar files (`-wal`, `-shm`) exist at runtime; the GGUF model (~600 MB) is a
 separate file. Deleting the db is a clean full reset — there is no other state.
@@ -253,8 +255,10 @@ hook-facing `/recall` `/ingest`, same auth rule: Bearer when `MEMORY_TOKEN` is s
 | Endpoint | Purpose |
 |---|---|
 | `GET /` | Self-contained browse page (zero build, zero framework, offline-capable) |
-| `GET /api/stats` | Totals, vectorized count, db size, embedder/device |
+| `GET /api/stats` | Totals, vectorized count, db size, embedder/device, injection summary |
 | `GET /api/memories?kind=&project=&limit=&offset=` | Paginated browse, newest-updated first |
+| `GET /api/injections?harness=&project=&limit=&offset=` | Injection telemetry, newest first |
+| `POST /inject/report` | Injection telemetry report (plugin/adapter channel, append-only) |
 | `DELETE /api/memories/{uid}` | Single-entry forget (same trust level as the CLI) |
 | `POST /api/maintenance/purge` | Bulk maintenance (soft-delete purge + TTL + VACUUM) |
 | `POST /api/maintenance/backfill` | Vector backfill for vectorless entries |
@@ -269,6 +273,16 @@ Open `http://127.0.0.1:8765/` for stats overview, RRF search, kind/project
 filtering, single-entry forgetting, and (on token-secured installs) one-click
 maintenance. There is still no bulk editing; observability is what makes
 "relevance is never lost" believable.
+
+**Injection telemetry.** Recall ≠ injection — only the injecting side knows a
+block actually entered the context, so the opencode plugin reports each real
+injection to `POST /inject/report` (fire-and-forget): harness, hook, trigger
+query, memory uids, block size. The browse page shows the supply-side picture:
+total/7-day injection counts, characters (with a rough ÷4 token estimate),
+per-harness/per-hook distribution, the **Top10 most-injected memories**, and
+the 20 most recent injections. This measures what was *supplied* — whether the
+model *used* it is not measurable and deliberately not faked. Telemetry rows
+expire after `MEMORY_TTL_INJECTION_DAYS` (default 90).
 
 ## Maintenance & lifecycle
 
@@ -285,7 +299,8 @@ recommend).
   growth slope of compaction-flush sources, which love re-storing near-identical
   content.
 - **Retention tiers**: `preference` / `decision` / `fact` are permanent;
-  `artifact` (tool captures) expires after `MEMORY_TTL_ARTIFACT_DAYS`.
+  `artifact` (tool captures) expires after `MEMORY_TTL_ARTIFACT_DAYS`;
+  injection telemetry expires after `MEMORY_TTL_INJECTION_DAYS`.
 - **`memory-mcp purge`**: hard-deletes soft-deleted entries, applies the TTL,
   then `VACUUM` (only when something was actually removed). Same routine runs at
   every service start (`MEMORY_MAINTENANCE_ON_START=1`) — restart frequency is
@@ -328,18 +343,20 @@ channel (~15 lines, zero dependencies) — see the roadmap.
 
 ```bash
 pip install -e ".[dev]"
-pytest            # 33 tests: store / dual-channel recall / soft delete / RRF math /
+pytest            # 39 tests: store / dual-channel recall / soft delete / RRF math /
                   # CJK substring / query-prefix contract / fault tolerance /
                   # lifecycle dedup & TTL / migration / REST & /api routes /
                   # bulk double-gate auth / MCP tool layer /
-                  # random-port serve & service discovery
+                  # random-port serve & service discovery /
+                  # injection telemetry (report/aggregation/TTL/auth)
 
 cd opencode-plugin
 npm install       # then:
 npm run typecheck # tsc --strict against @opencode/plugin 2.0.28 types
-npm test          # build + 16 mock-ctx hook assertions against a live service
-                  # (stable line: inject/dedup/remember/compaction/tool-capture;
-                  #  legacy line: v1 hook map, synthetic parts, compacting reset)
+npm test          # build + 19 mock-ctx hook assertions against a live service
+                  # (stable line: inject/dedup/remember/compaction/tool-capture/
+                  #  telemetry; legacy line: v1 hook map, synthetic parts,
+                  #  compacting reset, telemetry; options: env wins, gap-filling)
 ```
 
 The plugin is additionally verified against the real opencode dev loader

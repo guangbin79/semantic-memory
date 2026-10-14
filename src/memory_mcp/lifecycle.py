@@ -60,17 +60,21 @@ def ingest_with_dedup(
 def run_maintenance(
     store: MemoryStore,
     ttl_artifact_days: int = 90,
+    ttl_injection_days: int = 90,
 ) -> dict:
-    """维护例程：硬删软删除 → TTL 清理 → 有删除才 VACUUM。
+    """维护例程：硬删软删除 → TTL 清理（artifact + 注入遥测）→ 有删除才 VACUUM。
 
     设计取舍：fact/decision/preference 永久保留（去重抑制其增长），
-    TTL 只作用于时效性最强的 artifact 类。VACUUM 重写整个库文件，
-    只有真正删了东西才值得跑。
+    TTL 只作用于时效性最强的 artifact 类与遥测流水。VACUUM 重写整个
+    库文件，只有真正删了东西才值得跑。
     """
     report: dict = {"soft_deleted_purged": store.purge_soft_deleted()}
     if ttl_artifact_days > 0:
         cutoff = time.time() - ttl_artifact_days * 86400
         report["ttl_purged"] = store.purge_older_than("artifact", cutoff)
+    if ttl_injection_days > 0:
+        cutoff = time.time() - ttl_injection_days * 86400
+        report["injections_purged"] = store.purge_injections_before(cutoff)
     removed = sum(v for v in report.values())
     if removed:
         store.vacuum()

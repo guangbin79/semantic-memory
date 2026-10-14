@@ -121,6 +121,7 @@ cp opencode-plugin/memory.ts ~/.config/opencode/plugins/
 | `MEMORY_TOKEN` | 空 | REST 侧车 Bearer 鉴权；绑非回环地址时**必配** |
 | `MEMORY_RRF_K` | `60` | RRF 融合常数 |
 | `MEMORY_TTL_ARTIFACT_DAYS` | `90` | `artifact` 类 TTL 天数；`0` = 不过期 |
+| `MEMORY_TTL_INJECTION_DAYS` | `90` | 注入遥测流水 TTL 天数；`0` = 不过期 |
 | `MEMORY_MAINTENANCE_ON_START` | `1` | 服务启动时运行维护例程 |
 | `MEMORY_DEDUP_SIM` | `0.98` | 向量近似去重阈值（同 project 内） |
 
@@ -193,6 +194,7 @@ MEMORY_PORT=0 memory-mcp
 | `memories` | 原文 + 元数据（kind / source / project / tags / 时间戳） |
 | `memories_fts`、`memories_fts_tri` | FTS5 倒排索引（porter / trigram），外部内容表——正文不重复存储 |
 | `memories_vec` | 向量 BLOB：每条 1024 维 float32 = 4KB |
+| `injections` | 注入遥测流水（harness/钩子/查询/uids/字符数） |
 
 运行期有 WAL 伴生文件（`-wal`、`-shm`）；GGUF 模型（~600MB）是独立文件。
 删除 db 文件即干净的全量重置——没有其他状态。备份用
@@ -229,8 +231,10 @@ MEMORY_PORT=0 memory-mcp
 | 端点 | 用途 |
 |---|---|
 | `GET /` | 自包含浏览页（零构建、零框架、离线可用） |
-| `GET /api/stats` | 总量、向量化数、库体积、嵌入通道/设备 |
+| `GET /api/stats` | 总量、向量化数、库体积、嵌入通道/设备、注入统计 |
 | `GET /api/memories?kind=&project=&limit=&offset=` | 分页浏览，按更新时间倒序 |
+| `GET /api/injections?harness=&project=&limit=&offset=` | 注入遥测，按时间倒序 |
+| `POST /inject/report` | 注入遥测上报（插件/适配器信道，只追加） |
 | `DELETE /api/memories/{uid}` | 单条遗忘（与 CLI 同信任级） |
 | `POST /api/maintenance/purge` | 批量维护（软删除硬清 + TTL + VACUUM） |
 | `POST /api/maintenance/backfill` | 向量补嵌 |
@@ -244,6 +248,15 @@ MEMORY_PORT=0 memory-mcp
 kind/project 过滤、单条遗忘，以及（在安全安装下）一键维护。
 仍然没有批量编辑——可观测性让"相关性不丢失"可被验证。
 
+**注入遥测。** 召回 ≠ 注入——只有注入方知道这次召回真的进了上下文，
+因此 opencode 插件在每完成一次真实注入后向 `POST /inject/report`
+上报（fire-and-forget）：harness、钩子、触发查询、注入的记忆 uid、
+块大小。浏览页据此呈现供给侧图景：累计/近 7 天注入次数、累计字符
+（附 ÷4 的 token 粗估）、按 harness/钩子分布、**反复被注入的记忆
+Top10**、最近 20 次注入流水。这里度量的是"供给了什么"——模型是否
+采纳不可度量，也刻意不做伪精确。遥测流水按
+`MEMORY_TTL_INJECTION_DAYS`（默认 90 天）过期清理。
+
 ## 维护与生命周期
 
 保留策略是**配置，不是 LLM 的自由裁量**。批量破坏性操作**刻意不作为 MCP
@@ -255,7 +268,8 @@ kind/project 过滤、单条遗忘，以及（在安全安装下）一键维护�
   不新增——重复出现视为"再次被证实相关"。这直接掐住压缩托管类来源反复
   存入近似内容导致的增长斜率。
 - **保留分层**：`preference` / `decision` / `fact` 永久；`artifact`
-  （工具捕获）按 `MEMORY_TTL_ARTIFACT_DAYS` 过期。
+  （工具捕获）按 `MEMORY_TTL_ARTIFACT_DAYS` 过期；注入遥测流水按
+  `MEMORY_TTL_INJECTION_DAYS` 过期。
 - **`memory-mcp purge`**：硬删软删除条目 → TTL 清理 → 有实际删除才 `VACUUM`。
   同一例程在每次服务启动时运行（`MEMORY_MAINTENANCE_ON_START=1`）——
   重启频率对天级粒度的保留策略足够；无 cron、无后台线程。
@@ -291,16 +305,18 @@ GPU 运行期嵌入失败（如 OOM）自动 CPU 重建重试一次。无 NVIDIA
 
 ```bash
 pip install -e ".[dev]"
-pytest            # 33 项：存储/双通道召回/软删除/RRF 数学/CJK 子串/查询前缀约定/
+pytest            # 39 项：存储/双通道召回/软删除/RRF 数学/CJK 子串/查询前缀约定/
                   # 容错/生命周期去重与 TTL/迁移/REST 与 /api 路由/
-                  # 批量双闸门鉴权/MCP 工具层/随机端口与服务发现
+                  # 批量双闸门鉴权/MCP 工具层/随机端口与服务发现/
+                  # 注入遥测（上报/聚合/TTL/鉴权）
 
 cd opencode-plugin
 npm install       # 然后：
 npm run typecheck # tsc --strict，类型基线 @opencode/plugin 2.0.28
-npm test          # 构建 + 16 项 mock-ctx 钩子断言（打真实服务；
-                  # stable 线：注入/去重/显式记忆/压缩托管/工具捕获；
-                  # legacy 线：v1 钩子映射、synthetic part、compacting 重置）
+npm test          # 构建 + 19 项 mock-ctx 钩子断言（打真实服务；
+                  # stable 线：注入/去重/显式记忆/压缩托管/工具捕获/遥测上报；
+                  # legacy 线：v1 钩子映射、synthetic part、compacting 重置、遥测上报；
+                  # options：env 优先、缺省补位）
 ```
 
 插件另经真实 opencode dev 加载器（`0.0.0-dev-202610130450`）验证：双形态导出

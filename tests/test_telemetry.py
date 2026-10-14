@@ -1,0 +1,85 @@
+"""注入遥测：上报端点、参数校验、统计聚合、Top 解析、TTL 清理、鉴权、Web 区块。
+
+server 模块在导入时按环境建库，本模块导入前指向临时库。
+"""
+import os
+import tempfile
+import time
+
+os.environ["MEMORY_DB_PATH"] = os.path.join(tempfile.mkdtemp(prefix="telemetry-"), "t.db")
+os.environ.pop("MEMORY_TOKEN", None)
+
+import pytest
+from starlette.testclient import TestClient
+
+from memory_mcp import server
+from memory_mcp.lifecycle import run_maintenance
+
+
+@pytest.fixture(scope="module")
+def client():
+    with TestClient(server.mcp.http_app()) as c:
+        yield c
+
+
+def test_report_and_list(client):
+    r = client.post("/inject/report", json={
+        "harness": "opencode", "hook": "context", "query": "部署分支",
+        "uids": ["u1", "u2"], "chars": 320, "project": "p1"})
+    assert r.status_code == 200 and r.json()["recorded"] is True and r.json()["id"] >= 1
+    rows = client.get("/api/injections", params={"harness": "opencode"}).json()["injections"]
+    assert rows and rows[0]["hook"] == "context" and rows[0]["chars"] == 320
+    assert rows[0]["project"] == "p1"
+
+
+def test_report_validation(client):
+    assert client.post("/inject/report", json={"uids": "notalist"}).status_code == 400
+    assert client.post("/inject/report", json={"uids": [1, 2]}).status_code == 400
+    assert client.post("/inject/report", json={"uids": [], "chars": "abc"}).status_code == 400
+    # 空 uids 是合法边界（注入块极简时），默认字段补齐
+    r = client.post("/inject/report", json={"uids": []})
+    assert r.json()["recorded"] is True
+
+
+def test_stats_aggregation_and_top(client):
+    u1 = client.post("/ingest", json={"content": "遥测热门条目甲", "kind": "fact"}).json()["uid"]
+    u2 = client.post("/ingest", json={"content": "遥测热门条目乙", "kind": "decision"}).json()["uid"]
+    client.post("/inject/report", json={"harness": "opencode", "hook": "generate",
+                                        "query": "q", "uids": [u1, u2], "chars": 100})
+    client.post("/inject/report", json={"harness": "claude-code", "hook": "prompt",
+                                        "query": "q", "uids": [u1], "chars": 60})
+    s = client.get("/api/stats").json()["injections"]
+    assert s["total"] >= 4 and s["total_chars"] >= 480 and s["recent_7d"] >= 4
+    assert s["by_harness"].get("opencode") >= 2 and s["by_harness"].get("claude-code") == 1
+    assert s["by_hook"].get("generate") >= 1 and s["by_hook"].get("prompt") >= 1
+    top = {t["uid"]: t for t in s["top"]}
+    assert top[u1]["times"] >= 2 and "热门条目甲" in top[u1]["content"]
+    assert top[u1]["kind"] == "fact"
+    # MCP 工具面也能看到注入总量
+    assert server.memory_stats()["injections"] == s["total"]
+
+
+def test_ttl_purge(client):
+    old = time.time() - 100 * 86400
+    server.store.record_injection("old-harness", "context", "q", ["x"], 10, ts=old)
+    before = client.get("/api/stats").json()["injections"]["total"]
+    report = run_maintenance(server.store, ttl_artifact_days=0, ttl_injection_days=90)
+    assert report["injections_purged"] >= 1
+    after = client.get("/api/stats").json()["injections"]["total"]
+    assert after == before - report["injections_purged"]
+
+
+def test_token_guard(client):
+    object.__setattr__(server.cfg, "token", "secret")
+    try:
+        assert client.post("/inject/report", json={"uids": []}).status_code == 401
+        assert client.get("/api/injections").status_code == 401
+        ok = client.post("/inject/report", json={"uids": []},
+                         headers={"authorization": "Bearer secret"})
+        assert ok.status_code == 200
+    finally:
+        object.__setattr__(server.cfg, "token", None)
+
+
+def test_web_page_has_telemetry_section(client):
+    assert "注入统计" in client.get("/").text

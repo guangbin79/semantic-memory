@@ -24,6 +24,7 @@ class Config:
     rrf_k: int                 # RRF 常数，经典值 60
     # ---- 生命周期维护（调用面：启动钩子 + CLI，刻意不在 MCP 工具面）----
     ttl_artifact_days: int     # artifact 类 TTL；0 = 不过期
+    ttl_injection_days: int    # 注入遥测 TTL；0 = 不过期
     maintenance_on_start: bool # 启动时跑维护例程
     dedup_sim: float           # 向量近似去重阈值（同 project 内）
     # ---- 服务发现（agent 自举：MEMORY_PORT=0 随机端口时靠它找到服务）----
@@ -51,6 +52,7 @@ class Config:
             recall_limit_default=int(os.environ.get("MEMORY_RECALL_LIMIT", "5")),
             rrf_k=int(os.environ.get("MEMORY_RRF_K", "60")),
             ttl_artifact_days=int(os.environ.get("MEMORY_TTL_ARTIFACT_DAYS", "90")),
+            ttl_injection_days=int(os.environ.get("MEMORY_TTL_INJECTION_DAYS", "90")),
             maintenance_on_start=os.environ.get("MEMORY_MAINTENANCE_ON_START", "1") == "1",
             dedup_sim=float(os.environ.get("MEMORY_DEDUP_SIM", "0.98")),
             discovery_file=discovery_file,

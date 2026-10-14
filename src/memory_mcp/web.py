@@ -53,6 +53,17 @@ INDEX_HTML = """<!DOCTYPE html>
   <button class="ghost" id="btn-backfill">向量补嵌（backfill）</button>
   <span id="maint-status"></span>
 </div>
+<details id="telemetry" open>
+  <summary>注入统计（供给侧：实际注入次数与内容；模型是否采纳不可度量）</summary>
+  <div class="stats" id="inj-stats"></div>
+  <div class="sub" id="inj-dist"></div>
+  <h2>反复被注入的记忆 Top10</h2>
+  <table><thead><tr><th>次数</th><th>kind</th><th>内容</th></tr></thead>
+    <tbody id="inj-top"></tbody></table>
+  <h2>最近注入</h2>
+  <table><thead><tr><th>时间</th><th>harness</th><th>钩子</th><th>触发查询</th><th>条目</th><th>字符</th></tr></thead>
+    <tbody id="inj-rows"></tbody></table>
+</details>
 <form id="f">
   <input id="q" placeholder="检索（走服务端混合召回 RRF）…">
   <select id="kind"><option value="">全部 kind</option>
@@ -98,6 +109,43 @@ async function loadStats() {
   }
 }
 
+async function loadInjections() {
+  const s = await api('/api/stats');
+  const inj = s.injections || {total: 0, total_chars: 0, recent_7d: 0, by_harness: {}, by_hook: {}, top: []};
+  $('inj-stats').innerHTML = '';
+  const cards = [['累计注入', inj.total], ['近 7 天', inj.recent_7d],
+    ['累计字符', inj.total_chars], ['≈tokens(粗估)', Math.round(inj.total_chars / 4)]];
+  for (const [k, v] of cards) {
+    const d = document.createElement('div'); d.className = 'stat';
+    const b = document.createElement('b'); b.textContent = v;
+    const sp = document.createElement('span'); sp.textContent = k;
+    d.append(b, sp); $('inj-stats').appendChild(d);
+  }
+  const dist = [];
+  for (const [k, v] of Object.entries(inj.by_harness)) dist.push('harness ' + (k || '?') + ' ×' + v);
+  for (const [k, v] of Object.entries(inj.by_hook)) dist.push('钩子 ' + (k || '?') + ' ×' + v);
+  $('inj-dist').textContent = dist.join(' · ') || '暂无注入记录——插件完成首次注入后此处有数';
+  $('inj-top').innerHTML = '';
+  for (const t of inj.top) {
+    if (!t.content) continue;  // 已被遗忘的 uid
+    const tr = document.createElement('tr');
+    esc(tr, t.times);
+    const k = document.createElement('span'); k.className = 'kind ' + t.kind; k.textContent = t.kind;
+    const td = document.createElement('td'); td.appendChild(k); tr.appendChild(td);
+    esc(tr, t.content);
+    $('inj-top').appendChild(tr);
+  }
+  const list = (await api('/api/injections?limit=20')).injections;
+  $('inj-rows').innerHTML = '';
+  for (const r of list) {
+    const tr = document.createElement('tr');
+    esc(tr, fmt(r.ts)); esc(tr, r.harness || '?'); esc(tr, r.hook || '?');
+    esc(tr, (r.query || '').slice(0, 60));
+    esc(tr, JSON.parse(r.uids || '[]').length); esc(tr, r.chars);
+    $('inj-rows').appendChild(tr);
+  }
+}
+
 function render(hits, withScore) {
   $('rows').innerHTML = '';
   for (const h of hits) {
@@ -130,7 +178,7 @@ async function search(q) {
   render((await api('/recall', {method: 'POST',
     body: JSON.stringify({query: q, limit: 20, project: $('project').value || undefined})})).hits, true);
 }
-async function refresh() { await loadStats(); await recent(); }
+async function refresh() { await loadStats(); await loadInjections(); await recent(); }
 $('f').onsubmit = e => { e.preventDefault(); $('q').value.trim() ? search($('q').value.trim()) : recent(); };
 $('recent').onclick = recent;
 

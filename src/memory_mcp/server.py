@@ -93,8 +93,9 @@ def memory_list(project: str | None = None, limit: int = 20) -> list[dict]:
 
 @mcp.tool
 def memory_stats() -> dict:
-    """库统计：总量、向量化比例、按 kind 分布、嵌入通道状态。"""
-    return {**store.stats(), "embedder": embedder.available, "device": embedder.device}
+    """库统计：总量、向量化比例、按 kind 分布、嵌入通道状态、注入总量。"""
+    return {**store.stats(), "embedder": embedder.available, "device": embedder.device,
+            "injections": store.injection_stats()["total"]}
 
 
 # ---------------- REST 侧车（插件专用） ----------------
@@ -124,8 +125,31 @@ async def web_index(_: Request) -> HTMLResponse:
 async def api_stats(request: Request) -> JSONResponse:
     if not _authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
+    inj = store.injection_stats()
+    # 热门条目附带内容摘要（遗忘过的 uid 解析为 None，前端自行跳过）
+    top = []
+    for t in inj.pop("top_uids"):
+        rows = store.get_many([t["uid"]])
+        top.append({"uid": t["uid"], "times": t["times"],
+                    "content": rows[0]["content"][:120] if rows else None,
+                    "kind": rows[0]["kind"] if rows else None})
     return JSONResponse({**store.stats(), "embedder": embedder.available,
-                         "device": embedder.device})
+                         "device": embedder.device,
+                         "injections": {**inj, "top": top}})
+
+
+@mcp.custom_route("/api/injections", methods=["GET"])
+async def api_injections(request: Request) -> JSONResponse:
+    if not _authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    q = request.query_params
+    rows = store.list_injections(
+        harness=q.get("harness") or None,
+        project=q.get("project") or None,
+        limit=min(int(q.get("limit", 50)), 200),
+        offset=int(q.get("offset", 0)),
+    )
+    return JSONResponse({"injections": rows})
 
 
 @mcp.custom_route("/api/memories", methods=["GET"])
@@ -175,7 +199,8 @@ async def api_maintenance_purge(request: Request) -> JSONResponse:
     guard = _bulk_guard(request)
     if guard:
         return guard
-    return JSONResponse(run_maintenance(store, ttl_artifact_days=cfg.ttl_artifact_days))
+    return JSONResponse(run_maintenance(store, ttl_artifact_days=cfg.ttl_artifact_days,
+                          ttl_injection_days=cfg.ttl_injection_days))
 
 
 @mcp.custom_route("/api/maintenance/backfill", methods=["POST"])
@@ -216,6 +241,35 @@ async def rest_ingest(request: Request) -> JSONResponse:
         dedup_sim=cfg.dedup_sim,
     )
     return JSONResponse({"uid": uid, "deduped": deduped})
+
+
+@mcp.custom_route("/inject/report", methods=["POST"])
+async def inject_report(request: Request) -> JSONResponse:
+    """注入遥测上报（插件/适配器信道，只追加不删除）。
+
+    只有注入方知道"这次召回真的注进了上下文"——服务端只见召回。
+    记录供给侧事实：谁(harness)、哪个钩子、触发的查询、注入了哪些
+    条目、多大块。模型是否采纳不可知，此处不做伪精确度量。
+    """
+    if not _authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    body = await request.json()
+    uids = body.get("uids")
+    if not isinstance(uids, list) or not all(isinstance(u, str) for u in uids):
+        return JSONResponse({"error": "uids must be a string array"}, status_code=400)
+    try:
+        chars = int(body.get("chars", 0))
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "chars must be an integer"}, status_code=400)
+    rid = store.record_injection(
+        harness=str(body.get("harness", "")),
+        hook=str(body.get("hook", "")),
+        query=str(body.get("query", "")),
+        uids=uids,
+        chars=chars,
+        project=body.get("project"),
+    )
+    return JSONResponse({"recorded": True, "id": rid})
 
 
 # ---------------- 服务发现（随机端口自举） ----------------
@@ -301,7 +355,8 @@ def main() -> None:
 
     # ---- 管理子命令（维护面：LLM 够不到的地方）----
     if cmd == "purge":
-        report = run_maintenance(store, ttl_artifact_days=cfg.ttl_artifact_days)
+        report = run_maintenance(store, ttl_artifact_days=cfg.ttl_artifact_days,
+                          ttl_injection_days=cfg.ttl_injection_days)
         print(json.dumps(report, ensure_ascii=False))
         return
     if cmd == "backfill":
@@ -311,7 +366,8 @@ def main() -> None:
     # ---- serve：启动维护钩子（频率=服务重启，天级粒度足够）----
     if cfg.maintenance_on_start:
         log.info("startup maintenance: %s",
-                 run_maintenance(store, ttl_artifact_days=cfg.ttl_artifact_days))
+                 run_maintenance(store, ttl_artifact_days=cfg.ttl_artifact_days,
+                          ttl_injection_days=cfg.ttl_injection_days))
 
     transport = "stdio" if "--stdio" in args else "http"
     log.info("db=%s embedder=%s prefer=%s transport=%s", cfg.db_path, embedder.available, cfg.device, transport)

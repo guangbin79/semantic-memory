@@ -69,6 +69,19 @@ CREATE TABLE IF NOT EXISTS memories_vec (
 );
 CREATE INDEX IF NOT EXISTS idx_memories_project ON memories(project) WHERE deleted = 0;
 CREATE INDEX IF NOT EXISTS idx_memories_kind    ON memories(kind)    WHERE deleted = 0;
+-- 注入遥测：插件/适配器实际完成注入后上报（召回≠注入，只有插件知道注没注）。
+-- 记录的是"供给侧"事实——模型是否采纳不可知，不做伪精确。
+CREATE TABLE IF NOT EXISTS injections (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts      REAL NOT NULL,
+    harness TEXT NOT NULL DEFAULT '',   -- opencode / claude-code / kimi-code / ...
+    hook    TEXT NOT NULL DEFAULT '',   -- context / compaction / generate / chat.message / ...
+    query   TEXT NOT NULL DEFAULT '',
+    project TEXT,
+    chars   INTEGER NOT NULL DEFAULT 0, -- 注入块字符数
+    uids    TEXT NOT NULL DEFAULT '[]'  -- JSON 数组：本次注入的记忆 uid
+);
+CREATE INDEX IF NOT EXISTS idx_injections_ts ON injections(ts);
 """
 
 VALID_KINDS = {"fact", "decision", "preference", "artifact"}
@@ -420,6 +433,83 @@ class MemoryStore:
         }
         size = self.db_path.stat().st_size if self.db_path.exists() else 0
         return {"total": total, "vectorized": vecs, "by_kind": by_kind, "db_bytes": size}
+
+    # ---------------- 注入遥测 ----------------
+
+    def record_injection(
+        self,
+        harness: str,
+        hook: str,
+        query: str,
+        uids: list[str],
+        chars: int,
+        project: str | None = None,
+        ts: float | None = None,
+    ) -> int:
+        with self.conn:  # 事务块整体持锁：last_insert_rowid 不会与别的线程交错
+            self.conn.execute(
+                "INSERT INTO injections(ts, harness, hook, query, project, chars, uids)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (ts if ts is not None else time.time(),
+                 harness[:64], hook[:64], query[:2000], project, max(0, int(chars)),
+                 json.dumps(uids[:50])),
+            )
+            return self.conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+
+    def list_injections(
+        self,
+        harness: str | None = None,
+        project: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict]:
+        sql = "SELECT * FROM injections"
+        cond, args = [], []
+        if harness:
+            cond.append("harness = ?")
+            args.append(harness)
+        if project:
+            cond.append("project = ?")
+            args.append(project)
+        if cond:
+            sql += " WHERE " + " AND ".join(cond)
+        sql += " ORDER BY ts DESC LIMIT ? OFFSET ?"
+        args += [limit, offset]
+        return [dict(r) for r in self.conn.execute(sql, args)]
+
+    def purge_injections_before(self, cutoff_ts: float) -> int:
+        cur = self.conn.execute("DELETE FROM injections WHERE ts < ?", (cutoff_ts,))
+        self.conn.commit()
+        return cur.rowcount
+
+    def injection_stats(self) -> dict:
+        total = self.conn.execute("SELECT COUNT(*) c FROM injections").fetchone()["c"]
+        chars = self.conn.execute(
+            "SELECT COALESCE(SUM(chars),0) s FROM injections").fetchone()["s"]
+        by_harness = {
+            r["harness"]: r["c"]
+            for r in self.conn.execute(
+                "SELECT harness, COUNT(*) c FROM injections GROUP BY harness")
+        }
+        by_hook = {
+            r["hook"]: r["c"]
+            for r in self.conn.execute(
+                "SELECT hook, COUNT(*) c FROM injections GROUP BY hook")
+        }
+        recent7 = self.conn.execute(
+            "SELECT COUNT(*) c FROM injections WHERE ts > ?",
+            (time.time() - 7 * 86400,),
+        ).fetchone()["c"]
+        # 热门条目：json_each 展开 uids 统计注入频次 Top10
+        top = [
+            {"uid": r["value"], "times": r["c"]}
+            for r in self.conn.execute(
+                "SELECT j.value, COUNT(*) c FROM injections,"
+                " json_each(injections.uids) j GROUP BY j.value"
+                " ORDER BY c DESC LIMIT 10")
+        ]
+        return {"total": total, "total_chars": chars, "recent_7d": recent7,
+                "by_harness": by_harness, "by_hook": by_hook, "top_uids": top}
 
     def close(self) -> None:
         self.conn.close()
