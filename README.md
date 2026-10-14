@@ -89,7 +89,8 @@ Service:
 | `MEMORY_DB_PATH` | `~/.local/share/memory-mcp/memory.db` | Database path |
 | `MEMORY_MODEL_PATH` | empty | GGUF model path; empty = BM25-only fallback |
 | `MEMORY_DEVICE` | `cuda` | Embed device: `cuda` (default, auto-falls back to CPU) / `cpu` |
-| `MEMORY_HOST` / `MEMORY_PORT` | `127.0.0.1` / `8765` | Bind address |
+| `MEMORY_HOST` / `MEMORY_PORT` | `127.0.0.1` / `8765` | Bind address; port `0` = OS-assigned random port |
+| `MEMORY_DISCOVERY_FILE` | `<db>.server.json` | Service-discovery file; `off` = disabled |
 | `MEMORY_TOKEN` | empty | REST sidecar Bearer auth; **required** when binding non-loopback |
 | `MEMORY_RRF_K` | `60` | RRF fusion constant |
 | `MEMORY_TTL_ARTIFACT_DAYS` | `90` | TTL for `artifact` kind; `0` = never expire |
@@ -106,6 +107,25 @@ Plugin:
 | `MEMORY_PLUGIN_BUDGET_CHARS` | `2000` | Injection block character budget |
 | `MEMORY_PLUGIN_TOOL_CAPTURE` | empty | Tool capture whitelist (comma-separated), e.g. `gis,bash` |
 | `MEMORY_PLUGIN_AUTOSTART` | `0` | `=1` spawns the service if unreachable |
+
+## Random port & agent bootstrap
+
+An agent that spawns the service itself can avoid port hunting and collisions
+entirely — `MEMORY_PORT=0` lets the OS assign a free port, and the real address
+is published through two channels the moment the bind completes:
+
+```bash
+MEMORY_PORT=0 memory-mcp
+# stdout (machine-readable, one line):
+# MEMORY_MCP_LISTENING {"url":"http://127.0.0.1:41697","mcp_url":".../mcp","port":41697,"pid":...}
+# and the same JSON in the discovery file: <db>.server.json (override: MEMORY_DISCOVERY_FILE)
+```
+
+So the bootstrap flow is: spawn → parse the stdout line **or** read the
+discovery file → point `MEMORY_PLUGIN_URL` / MCP registration at `url`.
+The file is retracted on graceful shutdown (SIGINT/SIGTERM); after a hard kill
+readers can still detect staleness via the embedded `pid`. `stdio` mode has no
+port and publishes nothing.
 
 ## Indexing: near-real-time, no rebuild windows
 
@@ -250,10 +270,11 @@ channel (~15 lines, zero dependencies) — see the roadmap.
 
 ```bash
 pip install -e ".[dev]"
-pytest            # 31 tests: store / dual-channel recall / soft delete / RRF math /
+pytest            # 33 tests: store / dual-channel recall / soft delete / RRF math /
                   # CJK substring / query-prefix contract / fault tolerance /
                   # lifecycle dedup & TTL / migration / REST & /api routes /
-                  # bulk double-gate auth / MCP tool layer
+                  # bulk double-gate auth / MCP tool layer /
+                  # random-port serve & service discovery
 
 cd opencode-plugin
 npm install       # then:

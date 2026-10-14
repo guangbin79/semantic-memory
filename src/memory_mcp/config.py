@@ -26,12 +26,22 @@ class Config:
     ttl_artifact_days: int     # artifact 类 TTL；0 = 不过期
     maintenance_on_start: bool # 启动时跑维护例程
     dedup_sim: float           # 向量近似去重阈值（同 project 内）
+    # ---- 服务发现（agent 自举：MEMORY_PORT=0 随机端口时靠它找到服务）----
+    discovery_file: Path | None  # 启动后写入 {url,port,pid,...}；None = 不写
 
     @classmethod
     def from_env(cls) -> "Config":
         model = os.environ.get("MEMORY_MODEL_PATH")
+        db_path = Path(os.environ.get("MEMORY_DB_PATH", _default_db()))
+        discovery = os.environ.get("MEMORY_DISCOVERY_FILE")
+        if discovery is None:
+            discovery_file: Path | None = db_path.with_name(db_path.name + ".server.json")
+        elif discovery.strip().lower() in ("", "off", "none"):
+            discovery_file = None
+        else:
+            discovery_file = Path(discovery)
         return cls(
-            db_path=Path(os.environ.get("MEMORY_DB_PATH", _default_db())),
+            db_path=db_path,
             host=os.environ.get("MEMORY_HOST", "127.0.0.1"),
             port=int(os.environ.get("MEMORY_PORT", "8765")),
             token=os.environ.get("MEMORY_TOKEN") or None,
@@ -43,4 +53,5 @@ class Config:
             ttl_artifact_days=int(os.environ.get("MEMORY_TTL_ARTIFACT_DAYS", "90")),
             maintenance_on_start=os.environ.get("MEMORY_MAINTENANCE_ON_START", "1") == "1",
             dedup_sim=float(os.environ.get("MEMORY_DEDUP_SIM", "0.98")),
+            discovery_file=discovery_file,
         )

@@ -77,7 +77,8 @@ cp opencode-plugin/memory.ts ~/.config/opencode/plugins/
 | `MEMORY_DB_PATH` | `~/.local/share/memory-mcp/memory.db` | 数据库路径 |
 | `MEMORY_MODEL_PATH` | 空 | GGUF 模型路径；空 = 纯 BM25 降级 |
 | `MEMORY_DEVICE` | `cuda` | 嵌入设备：`cuda`（默认，失败自动回退 CPU）/ `cpu` |
-| `MEMORY_HOST` / `MEMORY_PORT` | `127.0.0.1` / `8765` | 绑定地址 |
+| `MEMORY_HOST` / `MEMORY_PORT` | `127.0.0.1` / `8765` | 绑定地址；端口 `0` = OS 随机分配 |
+| `MEMORY_DISCOVERY_FILE` | `<db>.server.json` | 服务发现文件；`off` = 关闭 |
 | `MEMORY_TOKEN` | 空 | REST 侧车 Bearer 鉴权；绑非回环地址时**必配** |
 | `MEMORY_RRF_K` | `60` | RRF 融合常数 |
 | `MEMORY_TTL_ARTIFACT_DAYS` | `90` | `artifact` 类 TTL 天数；`0` = 不过期 |
@@ -94,6 +95,22 @@ cp opencode-plugin/memory.ts ~/.config/opencode/plugins/
 | `MEMORY_PLUGIN_BUDGET_CHARS` | `2000` | 注入块字符预算 |
 | `MEMORY_PLUGIN_TOOL_CAPTURE` | 空 | 工具捕获白名单（逗号分隔），如 `gis,bash` |
 | `MEMORY_PLUGIN_AUTOSTART` | `0` | `=1` 时服务未启动则自动 spawn |
+
+## 随机端口与 agent 自举
+
+agent 自己拉起服务时可以完全绕开端口占用问题——`MEMORY_PORT=0` 由 OS 分配
+空闲端口，绑定完成的瞬间通过两条通道发布真实地址：
+
+```bash
+MEMORY_PORT=0 memory-mcp
+# stdout（机器可读，单行）：
+# MEMORY_MCP_LISTENING {"url":"http://127.0.0.1:41697","mcp_url":".../mcp","port":41697,"pid":...}
+# 同一份 JSON 同时写入发现文件：<db>.server.json（可用 MEMORY_DISCOVERY_FILE 覆盖）
+```
+
+自举流程：spawn → 解析 stdout 行**或**读发现文件 → 把 `url` 填进
+`MEMORY_PLUGIN_URL` / MCP 注册配置。优雅退出（SIGINT/SIGTERM）时撤下文件；
+被 kill -9 时读取方可凭文件内 `pid` 判活。`stdio` 模式无端口，不发布任何信息。
 
 ## 索引：接近实时，无重建窗口
 
@@ -217,9 +234,9 @@ GPU 运行期嵌入失败（如 OOM）自动 CPU 重建重试一次。无 NVIDIA
 
 ```bash
 pip install -e ".[dev]"
-pytest            # 31 项：存储/双通道召回/软删除/RRF 数学/CJK 子串/查询前缀约定/
+pytest            # 33 项：存储/双通道召回/软删除/RRF 数学/CJK 子串/查询前缀约定/
                   # 容错/生命周期去重与 TTL/迁移/REST 与 /api 路由/
-                  # 批量双闸门鉴权/MCP 工具层
+                  # 批量双闸门鉴权/MCP 工具层/随机端口与服务发现
 
 cd opencode-plugin
 npm install       # 然后：

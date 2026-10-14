@@ -5,10 +5,15 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import os
+import signal
 import sys
+import time
 
+import uvicorn
 from fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse
@@ -213,6 +218,79 @@ async def rest_ingest(request: Request) -> JSONResponse:
     return JSONResponse({"uid": uid, "deduped": deduped})
 
 
+# ---------------- 服务发现（随机端口自举） ----------------
+
+def _announce(port: int) -> dict:
+    """绑定完成后对外发布真实地址：发现文件 + stdout 机器可读行。
+
+    agent 自举流程：spawn 本进程（MEMORY_PORT=0）→ 读 discovery_file
+    或解析 stdout 的 MEMORY_MCP_LISTENING 行 → 得到 url。
+    """
+    url = f"http://{cfg.host}:{port}"
+    info = {
+        "url": url,
+        "mcp_url": f"{url}/mcp",
+        "port": port,
+        "host": cfg.host,
+        "pid": os.getpid(),
+        "db_path": str(cfg.db_path),
+        "token_required": cfg.token is not None,
+        "started_at": time.time(),
+    }
+    f = cfg.discovery_file
+    if f is not None:
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps(info, ensure_ascii=False, indent=2))
+    print(f"MEMORY_MCP_LISTENING {json.dumps(info, ensure_ascii=False)}", flush=True)
+    log.info("listening on %s (mcp: %s/mcp)", url, url)
+    return info
+
+
+def _retract() -> None:
+    """退出时撤下发现文件，避免 agent 读到僵尸地址（文件内含 pid 可二次校验）。"""
+    f = cfg.discovery_file
+    if f is not None:
+        try:
+            f.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _install_exit_handler() -> None:
+    """SIGINT/SIGTERM → SystemExit：uvicorn 优雅停机后会以默认处置重放信号
+    （rc=143，Python 栈不再展开）；换成 SystemExit 让 finally/atexit 能撤下
+    发现文件，退出码仍保持 128+sig 语义。"""
+
+    def _handler(sig, _frame):
+        raise SystemExit(128 + sig)
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, _handler)
+
+
+async def _serve_http_async() -> None:
+    """程序化驱动 uvicorn：只有拿到 server 对象，才能在 port=0 时读回真实端口。"""
+    _install_exit_handler()
+    app = mcp.http_app(path="/mcp")
+    server = uvicorn.Server(uvicorn.Config(app, host=cfg.host, port=cfg.port,
+                                           log_level="warning"))
+    task = asyncio.create_task(server.serve())
+    for _ in range(600):  # 启动完成探测，最长 30s
+        if server.started:
+            break
+        if task.done():
+            task.result()  # 抛出真实启动错误
+        await asyncio.sleep(0.05)
+    else:
+        raise RuntimeError("uvicorn startup timeout (30s)")
+    port = server.servers[0].sockets[0].getsockname()[1]
+    _announce(port)
+    try:
+        await task
+    finally:
+        _retract()
+
+
 # ---------------- 入口 ----------------
 
 def main() -> None:
@@ -240,10 +318,11 @@ def main() -> None:
     if cfg.token is None and cfg.host != "127.0.0.1":
         log.warning("MEMORY_TOKEN 未设置且绑定非回环地址 %s，REST 侧车无鉴权！", cfg.host)
     if transport == "stdio":
-        # stdio 模式仅暴露 MCP 工具（REST 侧车不可用）
+        # stdio 模式仅暴露 MCP 工具（REST 侧车不可用，无端口与发现文件）
         mcp.run(transport="stdio")
     else:
-        mcp.run(transport="http", host=cfg.host, port=cfg.port, path="/mcp")
+        # MEMORY_PORT=0 → OS 分配临时端口，绑定后通过发现文件/stdout 发布真实地址
+        asyncio.run(_serve_http_async())
 
 
 if __name__ == "__main__":
