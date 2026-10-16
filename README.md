@@ -293,8 +293,11 @@ Everything lives in **one SQLite file** (`MEMORY_DB_PATH`, default
 WAL sidecar files (`-wal`, `-shm`) exist at runtime; the GGUF model (~600 MB) is a
 separate file. Deleting the db is a clean full reset — there is no other state.
 Back up with `sqlite3 memory.db ".backup '/path/to/backup.db'"`. Unlike
-ctx-semantic, the vector matrix is read from SQLite per query (the page cache
-carries this to ~50k entries) — zero cache-invalidation logic.
+ctx-semantic, there is no ANN to build or rebuild — and since v0.3 the vector
+matrix is cached in-process per `(project, scope)` key, invalidated by
+`PRAGMA data_version` (bumps on any connection's commit, including the distill
+flush's own connection) plus the store's own write counter. A recall with no
+interleaved writes pays zero SQLite vector reads.
 
 ## Sharing model
 
@@ -481,9 +484,18 @@ semantic-memory eval --golden FILE [--k 1,3,5] [--judge]
 ```
 
 golden jsonl, one `{query, expect_uids[], project?}` per line; prints per-row
-@k hits plus a recall@k / MRR summary and a JSON report. `--judge` annotates
-misses with the Distiller (silently skipped when no distill model is
-configured). Pure CLI — never a server endpoint.
+@k hits plus a recall@k / MRR summary and a JSON report. Pure CLI — never a
+server endpoint.
+
+**Eval flywheel (v0.3)**: `semantic-memory golden [--out FILE]` builds a golden
+set from real injection telemetry (deduped by `(project, query)`, most recent
+first — supply-side labels: injected ≠ adopted, but self-consistent as a
+recall@k expectation). `--judge` annotates misses with the **Reranker**: a
+high relevance score for the expected contents means a true retrieval miss, a
+low score means the golden label itself is suspect (graceful skip without a
+reranker). `--min-recall K:FLOAT` (e.g. `5:0.85`) turns eval into a gate —
+exit code 1 below the threshold (CI/regression use; wired in
+`.github/workflows/ci.yml` via `MEMORY_GOLDEN` + `MEMORY_MIN_RECALL`).
 `tests/fixtures/golden.sample.jsonl` is a 3-row format example only; the gate
 set (≥30 real queries built from your own store) decides the rerank default:
 **rerank stays off until eval shows recall@5 ≥ the RRF baseline on that real
