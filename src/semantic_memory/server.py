@@ -717,7 +717,7 @@ def _cmd_consolidate() -> None:
 _USAGE = """usage: semantic-memory [-h] [command]
 
 语义记忆服务（单进程）。默认命令 serve：启动 HTTP 服务（REST 面）。
-管理子命令：purge / backfill / eval / consolidate / distill（详见各 --help）。
+管理子命令：setup / purge / backfill / eval / consolidate / distill（详见各 --help）。
 """
 
 
@@ -731,6 +731,9 @@ def main() -> None:
         return
 
     # ---- 管理子命令（维护面：LLM 够不到的地方）----
+    if cmd == "setup":  # 安装面（任务 8）：探测→校验下载→写 config→冒烟
+        from .setup import run_setup
+        raise SystemExit(run_setup(args[1:]))
     if cmd == "purge":
         report = run_maintenance(store, ttl_artifact_days=cfg.ttl_artifact_days,
                           ttl_injection_days=cfg.ttl_injection_days,
