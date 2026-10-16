@@ -1,3 +1,5 @@
+> 仓库更名待办：**semantic-memory-mcp → semantic-memory**——在 GitHub Settings 里改名后执行 `git remote set-url origin git@github.com:guangbin79/semantic-memory.git`；旧链接自动重定向。
+
 # semantic-memory
 
 **[English](README.md) | [中文](README.zh-CN.md)**

@@ -1,3 +1,5 @@
+> Repository rename pending: **semantic-memory-mcp → semantic-memory** — rename it in GitHub Settings, then run `git remote set-url origin git@github.com:guangbin79/semantic-memory.git`; old links redirect automatically.
+
 # semantic-memory
 
 **[English](README.md) | [中文](README.zh-CN.md)**
