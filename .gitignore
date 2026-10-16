@@ -10,3 +10,5 @@ build/
 models/
 node_modules/
 .DS_Store
+.omo/
+.review-loop/
