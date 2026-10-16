@@ -46,3 +46,19 @@ def test_store_rejects_invalid_kind():
 
 def test_recall_empty_query():
     assert server.memory_recall(query="", limit=5) == []
+
+
+def test_memory_recall_global_two_path():
+    """global_limit>0 + project：项目条目在前、全局补足；默认 0 保持现状。"""
+    p = server.memory_store(content="MCP 两路项目条目 QY10M",
+                            kind="fact", project="two-path-mcp")["uid"]
+    g = server.memory_store(content="MCP 两路全局条目 QY10N", kind="fact")["uid"]
+    hits = server.memory_recall(query="QY10", limit=4,
+                                project="two-path-mcp", global_limit=2)
+    assert [h["uid"] for h in hits] == [p, g]
+    # 默认（global_limit=0）：现状兼容——项目过滤下项目条目仍命中
+    hits0 = server.memory_recall(query="QY10", limit=4, project="two-path-mcp")
+    assert p in [h["uid"] for h in hits0]
+    # 不传 project：退化为现状全局检索（两路开关不改变该语义）
+    hits_all = server.memory_recall(query="QY10", limit=4, global_limit=2)
+    assert {p, g} <= {h["uid"] for h in hits_all}

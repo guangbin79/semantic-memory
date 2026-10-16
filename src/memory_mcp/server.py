@@ -5,32 +5,115 @@
 """
 from __future__ import annotations
 
+import argparse
 import asyncio
+import hmac
 import json
+import math
 import logging
 import os
 import signal
 import sys
+import threading
 import time
+from collections import deque
+from pathlib import Path
 
 import uvicorn
 from fastmcp import FastMCP
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse
-
+from starlette.responses import HTMLResponse, JSONResponse, Response
 from .web import INDEX_HTML
 
+from .cloud import Consolidator
 from .config import Config
 from .db import MemoryStore
+from .distiller import Distiller
 from .embedder import Embedder
 from .hybrid import hybrid_recall
-from .lifecycle import backfill_vectors, ingest_with_dedup, run_maintenance
+from .lifecycle import (
+    backfill_vectors,
+    enqueue_raw,
+    flush_distill_queue,
+    ingest_with_dedup,
+    run_maintenance,
+    stamp_recalled,
+)
+from .project import backfill_project_keys, resolve_project
+from .modelslot import ModelSlot
+from .reranker import Reranker
 
 log = logging.getLogger("memory_mcp")
+
+# ---------------- 观测面（task14）：召回延迟分位数 + 阈值告警 ----------------
+# 提醒只住观测面（stats/日志/网页）——禁向会话/注入流写入任何告警。
+
+recall_latencies: deque[float] = deque(maxlen=100)   # /recall 最近延迟样本（ms）
+_alert_last: dict[str, float] = {}                   # level → 上次告警的 monotonic 时刻
+ALERT_WINDOW_S = 600.0      # 同级告警节流窗口：10 分钟内只打一次
+WARN_P95_MS = 800.0
+ERROR_P95_MS = 1200.0
+ENTRIES_CEILING = 40000     # 暴力扫性能天花板预警线
+_LEVELS = {"info": logging.INFO, "warning": logging.WARNING, "error": logging.ERROR}
+
+
+def percentile(xs: list[float], p: float) -> float:
+    """最近秩分位数：排序后取第 ceil(n·p) 个；空序列返回 0.0。"""
+    if not xs:
+        return 0.0
+    s = sorted(xs)
+    return s[max(0, math.ceil(len(s) * p / 100) - 1)]
+
+
+def plan_alerts(p95_ms: float, entries: int, last: dict[str, float],
+                now: float) -> list[tuple[str, str]]:
+    """阈值判定（纯函数，不改动 last）：p95>1200 ERROR、>800 WARN、
+    entries>40000 INFO（接近暴力扫天花板）；同级受 10 分钟节流。"""
+    candidates: list[tuple[str, str]] = []
+    if p95_ms > ERROR_P95_MS:
+        candidates.append(("error", f"recall p95={p95_ms:.0f}ms > {ERROR_P95_MS:.0f}ms"))
+    elif p95_ms > WARN_P95_MS:
+        candidates.append(("warning", f"recall p95={p95_ms:.0f}ms > {WARN_P95_MS:.0f}ms"))
+    if entries > ENTRIES_CEILING:
+        candidates.append(("info",
+                           f"entries={entries} > {ENTRIES_CEILING}，接近暴力扫性能天花板"))
+    return [(lv, msg) for lv, msg in candidates
+            if now - last.get(lv, float("-inf")) >= ALERT_WINDOW_S]
+
+
+def _obs_stats() -> dict:
+    """观测面字段：/api/stats 与 memory_stats 共用同一份。"""
+    lats = list(recall_latencies)
+    return {
+        "recall_p50_ms": round(percentile(lats, 50), 1),
+        "recall_p95_ms": round(percentile(lats, 95), 1),
+        "distill_queue_len": store.distill_pending(),
+        # task12 语义：进程内存计数，服务重启即重置
+        "cloud_calls_24h": consolidator.stats()["calls"],
+        "entries": store.stats()["total"],
+    }
+
+
+def _record_recall(ms: float) -> None:
+    """/recall 计时入窗口并评估阈值告警（仅观测面动作，零注入流影响）。"""
+    recall_latencies.append(ms)
+    now = time.monotonic()
+    p95 = percentile(list(recall_latencies), 95)
+    for lv, msg in plan_alerts(p95, store.stats()["total"], _alert_last, now):
+        _alert_last[lv] = now
+        log.log(_LEVELS[lv], "recall alert: %s", msg)
 
 cfg = Config.from_env()
 store = MemoryStore(cfg.db_path)
 embedder = Embedder(cfg.model_path, dim=cfg.embed_dim, device=cfg.device)
+_slot = ModelSlot()  # 单槽分时：rerank 与 distill 互斥换载（embedder 常驻槽外）
+reranker = Reranker(cfg.rerank_model, device=cfg.device, budget_ms=cfg.rerank_budget_ms, slot=_slot)
+distiller = Distiller(cfg.distill_model, cfg.device, slot=_slot)  # 惰性加载：首次 distill 才经槽加载模型
+consolidator = Consolidator(
+    cfg.cloud_base_url, cfg.cloud_api_key, cfg.cloud_model,
+    enabled=cfg.cloud_enabled, daily_max_calls=cfg.cloud_daily_max_calls,
+    daily_max_tokens=cfg.cloud_daily_max_tokens, batch_n=cfg.cloud_batch_n,
+)
 
 mcp = FastMCP(
     name="memory",
@@ -57,7 +140,7 @@ def memory_store(
     时间戳而非新增——deduped=true 表示命中去重。
     """
     uid, deduped = ingest_with_dedup(
-        store, embedder, content, kind, "manual", project, tags, cfg.dedup_sim
+        store, embedder, content, kind, "manual", resolve_project(project), tags, cfg.dedup_sim
     )
     return {"uid": uid, "deduped": deduped, "vectorized": embedder.available}
 
@@ -67,11 +150,44 @@ def memory_recall(
     query: str,
     limit: int = 5,
     project: str | None = None,
+    global_limit: int = 0,
 ) -> list[dict]:
-    """混合检索相关记忆，按 RRF 分数降序。"""
+    """混合检索相关记忆，按 RRF 分数降序。
+
+    global_limit>0 且指定 project 时走 project+global 两路合并：
+    项目条目在前，全局（project=NULL）条目补足其后，总数 ≤ limit。
+    """
+    return _recall_hits(query, limit, resolve_project(project), global_limit)
+
+
+def _recall_hits(query: str, limit: int, project: str | None, global_limit: int) -> list[dict]:
+    """混合召回；global_limit>0 且指定 project 时两路合并（REST/MCP 共用）。
+
+    project 路（scope='project'）在前，global 路（scope='global'，配额
+    global_limit）补足其后；去重后按 limit 截断——全局条目不挤占项目配额。
+    global_limit=0 或未指定 project 时单路调用，与既有行为逐字节一致。
+    """
+    if global_limit > 0 and project:
+        proj_hits = hybrid_recall(
+            store, embedder, query=query, limit=limit, project=project,
+            rrf_k=cfg.rrf_k, inject_boost=cfg.inject_boost,
+            min_cosine=cfg.recall_min_cosine, max_cosine=cfg.recall_max_cosine,
+            reranker=reranker, rerank_candidates=cfg.rerank_candidates,
+        )
+        glob_hits = hybrid_recall(
+            store, embedder, query=query, limit=global_limit, project=None,
+            rrf_k=cfg.rrf_k, inject_boost=cfg.inject_boost,
+            min_cosine=cfg.recall_min_cosine, max_cosine=cfg.recall_max_cosine,
+            reranker=reranker, rerank_candidates=cfg.rerank_candidates,
+            scope="global",
+        )
+        seen = {h["uid"] for h in proj_hits}
+        return (proj_hits + [h for h in glob_hits if h["uid"] not in seen])[:limit]
     return hybrid_recall(
-        store, embedder, query, limit, project, rrf_k=cfg.rrf_k,
-        inject_boost=cfg.inject_boost, min_cosine=cfg.recall_min_cosine,
+        store, embedder, query=query, limit=limit, project=project,
+        rrf_k=cfg.rrf_k, inject_boost=cfg.inject_boost,
+        min_cosine=cfg.recall_min_cosine, max_cosine=cfg.recall_max_cosine,
+        reranker=reranker, rerank_candidates=cfg.rerank_candidates,
     )
 
 
@@ -96,9 +212,10 @@ def memory_list(project: str | None = None, limit: int = 20) -> list[dict]:
 
 @mcp.tool
 def memory_stats() -> dict:
-    """库统计：总量、向量化比例、按 kind 分布、嵌入通道状态、注入总量。"""
+    """库统计：总量、向量化比例、按 kind 分布、嵌入通道状态、注入总量、观测面。"""
     return {**store.stats(), "embedder": embedder.available, "device": embedder.device,
-            "injections": store.injection_stats()["total"]}
+            "injections": store.injection_stats()["total"],
+            "cloud": consolidator.stats(), **_obs_stats()}
 
 
 # ---------------- REST 侧车（插件专用） ----------------
@@ -107,8 +224,25 @@ def _authorized(request: Request) -> bool:
     if cfg.token is None:
         return True  # 未配置 token：依赖 127.0.0.1 回环绑定
     auth = request.headers.get("authorization", "")
-    return auth == f"Bearer {cfg.token}"
+    return hmac.compare_digest(auth.encode("latin-1"), f"Bearer {cfg.token}".encode())  # 常量时间比较（bytes 防 non-ASCII TypeError）
 
+
+class _McpAuthMiddleware:
+    """把 REST 侧车的 Bearer 门同样罩到 /mcp：FastMCP 未配 auth provider 时 /mcp 本为裸奔。"""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope.get("path", "").rstrip("/") == "/mcp" \
+                and cfg.token is not None:
+            headers = {k.lower(): v for k, v in scope.get("headers") or []}
+            auth = headers.get(b"authorization", b"")  # 保持 bytes：latin-1 str 会触发 compare_digest TypeError（500）
+            if not hmac.compare_digest(auth, f"Bearer {cfg.token}".encode("latin-1")):
+                resp = JSONResponse({"error": "unauthorized"}, status_code=401)
+                await resp(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
 
 @mcp.custom_route("/health", methods=["GET"])
 async def rest_health(_: Request) -> JSONResponse:
@@ -138,7 +272,7 @@ async def api_stats(request: Request) -> JSONResponse:
                     "kind": rows[0]["kind"] if rows else None})
     return JSONResponse({**store.stats(), "embedder": embedder.available,
                          "device": embedder.device,
-                         "injections": {**inj, "top": top}})
+                         "injections": {**inj, "top": top}, **_obs_stats()})
 
 
 @mcp.custom_route("/api/injections", methods=["GET"])
@@ -203,7 +337,8 @@ async def api_maintenance_purge(request: Request) -> JSONResponse:
     if guard:
         return guard
     return JSONResponse(run_maintenance(store, ttl_artifact_days=cfg.ttl_artifact_days,
-                          ttl_injection_days=cfg.ttl_injection_days))
+                          ttl_injection_days=cfg.ttl_injection_days,
+                          ttl_stale_days=cfg.ttl_stale_days))
 
 
 @mcp.custom_route("/api/maintenance/backfill", methods=["POST"])
@@ -219,15 +354,45 @@ async def rest_recall(request: Request) -> JSONResponse:
     if not _authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     body = await request.json()
-    hits = hybrid_recall(
-        store, embedder,
+    t0 = time.perf_counter()
+    hits = _recall_hits(
         query=body["query"],
         limit=int(body.get("limit", cfg.recall_limit_default)),
-        project=body.get("project"),
-        rrf_k=cfg.rrf_k,
-        inject_boost=cfg.inject_boost, min_cosine=cfg.recall_min_cosine,
+        project=resolve_project(body.get("project")),
+        global_limit=int(body.get("global_limit", 0)),
     )
+    _record_recall((time.perf_counter() - t0) * 1000.0)
     return JSONResponse({"hits": hits})
+
+
+# 入队路由（r3 评审）：chat/compaction 是蒸馏队列的投料源——落盘缓冲、热路径零 LLM；
+# 显式 remember / tool capture 保持直存（即时可见，也避免队列无人投料的死管道）。
+QUEUED_SOURCES = frozenset({"compaction", "chat"})
+
+
+def _spawn_flush() -> None:
+    # ponytail: 服务首批后台线程——独立 SQLite 连接、进程内单飞锁都在 flush_distill_queue；
+    # 此处仅兜底线程异常不让其无声死；线程死于进程死（daemon）。
+    def _run() -> None:
+        try:
+            report = flush_distill_queue(store, distiller, embedder=embedder)
+            log.info("distill flush: %s", report)
+            # task12：flush 完成后的云整合触发判定——沿用本 daemon 线程（禁入同步请求路径）
+            log.info("cloud consolidate: %s", consolidator.maybe_run(
+                store, embedder,
+                new_entries=report.get("typed", 0) + report.get("stored_raw", 0)))
+        except Exception:
+            log.exception("distill flush failed")
+    threading.Thread(target=_run, daemon=True, name="distill-flush").start()
+
+
+@mcp.custom_route("/idle", methods=["POST"])
+async def rest_idle(request: Request) -> Response:
+    """空闲触发蒸馏 flush：先回 204，flush 在 daemon 线程执行（热路径零 LLM）。"""
+    if not _authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    _spawn_flush()
+    return Response(status_code=204)
 
 
 @mcp.custom_route("/ingest", methods=["POST"])
@@ -235,12 +400,20 @@ async def rest_ingest(request: Request) -> JSONResponse:
     if not _authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     body = await request.json()
+    source = body.get("source", "chat")
+    project = resolve_project(body.get("project"))
+    if source in QUEUED_SOURCES:
+        pending = enqueue_raw(store, body["content"], source, project,
+                              body.get("session_id"))
+        if cfg.distill_batch > 0 and pending >= cfg.distill_batch:
+            _spawn_flush()  # 触发器一路：队列积压达阈值（flush 在 daemon 线程）
+        return JSONResponse({"queued": True, "pending": pending})
     uid, deduped = ingest_with_dedup(
         store, embedder,
         content=body["content"],
         kind=body.get("kind", "fact"),
-        source=body.get("source", "chat"),
-        project=body.get("project"),
+        source=source,
+        project=project,
         tags=body.get("tags"),
         dedup_sim=cfg.dedup_sim,
     )
@@ -273,6 +446,7 @@ async def inject_report(request: Request) -> JSONResponse:
         chars=chars,
         project=body.get("project"),
     )
+    stamp_recalled(store, uids)
     return JSONResponse({"recorded": True, "id": rid})
 
 
@@ -329,7 +503,8 @@ def _install_exit_handler() -> None:
 async def _serve_http_async() -> None:
     """程序化驱动 uvicorn：只有拿到 server 对象，才能在 port=0 时读回真实端口。"""
     _install_exit_handler()
-    app = mcp.http_app(path="/mcp")
+    app = mcp.http_app(path="/mcp", host_origin_protection="auto")  # 回环绑定默认开 Host/Origin 校验（DNS rebinding 防护）
+    app = _McpAuthMiddleware(app)  # /mcp 与 REST 同一 Bearer 门（轮 2 安全评审：MCP 端点此前绕过 MEMORY_TOKEN）
     server = uvicorn.Server(uvicorn.Config(app, host=cfg.host, port=cfg.port,
                                            log_level="warning"))
     task = asyncio.create_task(server.serve())
@@ -349,6 +524,131 @@ async def _serve_http_async() -> None:
         _retract()
 
 
+# ---------------- 离线评测与整合 CLI ----------------
+
+def _load_golden(path: Path) -> list[dict]:
+    """读 golden jsonl：每行 {query, expect_uids[], project?}，跳过空行。"""
+    rows: list[dict] = []
+    for i, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        raw = raw.strip()
+        if not raw:
+            continue
+        obj = json.loads(raw)
+        if not isinstance(obj, dict):
+            raise ValueError(f"第 {i} 行不是 JSON 对象")
+        if not obj.get("query") or not isinstance(obj.get("expect_uids"), list) \
+                or not obj["expect_uids"]:
+            raise ValueError(f"第 {i} 行缺少 query 或 expect_uids")
+        rows.append({"query": obj["query"], "expect_uids": list(obj["expect_uids"]),
+                     "project": obj.get("project")})
+    return rows
+
+
+def run_eval(store: MemoryStore, embedder: Embedder, rows: list[dict], ks: list[int]) -> dict:
+    """基线测量核心：对 golden 行逐条跑 hybrid_recall，聚合 recall@k 与 MRR。
+
+    recall@k：expect_uids 与 top-k 交集非空即该行命中；MRR 取首个命中排名
+    的倒数（未命中记 0）；两者都在全部 golden 行上取平均。检索窗口取
+    max(ks)——recall 与 MRR 共用同一次召回。调参取 cfg（与服务路径同源），
+    保证基线量的是“正在服役的检索器”（先测量后加装）。
+    """
+    per_row: list[dict] = []
+    for row in rows:
+        hits = hybrid_recall(store, embedder, row["query"], max(ks), row.get("project"),
+                             rrf_k=cfg.rrf_k, inject_boost=cfg.inject_boost,
+                             min_cosine=cfg.recall_min_cosine,
+                             max_cosine=cfg.recall_max_cosine,
+                             reranker=reranker, rerank_candidates=cfg.rerank_candidates)
+        expect = set(row["expect_uids"])
+        first = next((i for i, h in enumerate(hits, 1) if h["uid"] in expect), 0)
+        per_row.append({
+            "query": row["query"],
+            "hit_ks": {k: 0 < first <= k for k in ks},
+            "mrr": 1.0 / first if first else 0.0,
+        })
+    n = len(per_row)
+    return {
+        "n": n,
+        "recall_at_k": {str(k): sum(r["hit_ks"][k] for r in per_row) / n for k in ks},
+        "mrr": sum(r["mrr"] for r in per_row) / n,
+        "rows": per_row,
+    }
+
+
+def _judge_misses(missed: list[dict]) -> None:
+    """--judge 通道：对未命中样本做相关性抽样评注（Wave 3 Distiller 接线点）。
+
+    环境未配或模块未实装都只打印跳过提示——不报错，退出码保持 0。
+    """
+    if not missed:
+        return
+    if not os.environ.get("MEMORY_DISTILL_MODEL"):
+        print(f"[eval] judge: MEMORY_DISTILL_MODEL 未配置，跳过 {len(missed)} 条未命中样本评注")
+        return
+    try:
+        from .distiller import Distiller
+    except ImportError:
+        print(f"[eval] judge: Distiller 未实装，跳过 {len(missed)} 条未命中样本评注")
+        return
+    # 评注接线未实装：Distiller 模块已交付，逐条评注实现留待后续任务
+    print(f"[eval] judge: Distiller 已可用，评注接线未实装（{len(missed)} 条未命中）")
+
+
+def _cmd_eval(argv: list[str]) -> int:
+    """eval 子命令：golden 集上的 recall@k / MRR 基线（纯 CLI，禁入任何服务端点）。
+
+    检索侧每次改动都用同一命令对照基线——先测量后加装。
+    """
+    ap = argparse.ArgumentParser(
+        prog="memory-mcp eval",
+        description="对 golden jsonl 逐行跑混合检索，输出 recall@k 与 MRR 基线报告",
+    )
+    ap.add_argument("--golden", required=True,
+                    help="golden jsonl 路径，每行 {query, expect_uids[], project?}")
+    ap.add_argument("--k", default="1,3,5", help="逗号分隔的 k 值列表（默认 1,3,5）")
+    ap.add_argument("--judge", action="store_true",
+                    help="对未命中样本做相关性抽样评注（需 Distiller，Wave 3）")
+    ns = ap.parse_args(argv)
+
+    golden = Path(ns.golden)
+    if not golden.is_file():
+        print(f"eval: golden 文件不存在: {golden}", file=sys.stderr)
+        return 2
+    try:
+        ks = sorted({int(x) for x in ns.k.split(",") if x.strip()})
+    except ValueError:
+        ks = []
+    if not ks or ks[0] <= 0:
+        print(f"eval: --k 须为逗号分隔的正整数: {ns.k!r}", file=sys.stderr)
+        return 2
+    try:
+        rows = _load_golden(golden)
+    except (json.JSONDecodeError, ValueError, OSError) as exc:
+        print(f"eval: golden 格式错误: {exc}", file=sys.stderr)
+        return 2
+    if not rows:
+        print(f"eval: golden 无有效行: {golden}", file=sys.stderr)
+        return 2
+
+    report = run_eval(store, embedder, rows, ks)
+
+    for row in report["rows"]:
+        marks = "  ".join(f"@{k}={'Y' if row['hit_ks'][k] else '-'}" for k in ks)
+        print(f"{row['query'][:48]:<48}  {marks}  mrr={row['mrr']:.3f}")
+    summary = "  ".join(f"recall@{k}={report['recall_at_k'][str(k)]:.3f}" for k in ks)
+    print(f"n={report['n']}  {summary}  mrr={report['mrr']:.3f}")
+    print(json.dumps(report, ensure_ascii=False))
+
+    if ns.judge:
+        _judge_misses([r for r in report["rows"] if r["mrr"] == 0.0])
+    return 0
+
+
+def _cmd_consolidate() -> None:
+    """consolidate 子命令：云端整合手动入口（同步执行一次，打印报告 JSON）。"""
+    print(json.dumps(consolidator.run(store, embedder), ensure_ascii=False))
+
+
 # ---------------- 入口 ----------------
 
 def main() -> None:
@@ -360,18 +660,31 @@ def main() -> None:
     # ---- 管理子命令（维护面：LLM 够不到的地方）----
     if cmd == "purge":
         report = run_maintenance(store, ttl_artifact_days=cfg.ttl_artifact_days,
-                          ttl_injection_days=cfg.ttl_injection_days)
+                          ttl_injection_days=cfg.ttl_injection_days,
+                          ttl_stale_days=cfg.ttl_stale_days,
+                          dry_run="--dry-run" in args)
         print(json.dumps(report, ensure_ascii=False))
         return
     if cmd == "backfill":
         print(json.dumps(backfill_vectors(store, embedder), ensure_ascii=False))
+        return
+    if cmd == "eval":
+        raise SystemExit(_cmd_eval(args[1:]))
+    if cmd == "consolidate":
+        _cmd_consolidate()
+        return
+    if cmd == "distill":  # 触发器三路：手动 flush（同步跑完打印报告）
+        print(json.dumps(flush_distill_queue(store, distiller, embedder=embedder), ensure_ascii=False))
         return
 
     # ---- serve：启动维护钩子（频率=服务重启，天级粒度足够）----
     if cfg.maintenance_on_start:
         log.info("startup maintenance: %s",
                  run_maintenance(store, ttl_artifact_days=cfg.ttl_artifact_days,
-                          ttl_injection_days=cfg.ttl_injection_days))
+                          ttl_injection_days=cfg.ttl_injection_days,
+                          ttl_stale_days=cfg.ttl_stale_days))
+    # 存量回填（Metis M-3）：目录路径型 project 改写为归一化键；幂等，唯一旧值批量不逐行 spawn
+    log.info("project key backfill: %s", backfill_project_keys(store))
 
     transport = "stdio" if "--stdio" in args else "http"
     log.info("db=%s embedder=%s prefer=%s transport=%s", cfg.db_path, embedder.available, cfg.device, transport)
