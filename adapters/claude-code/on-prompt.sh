@@ -15,7 +15,7 @@ PROMPT=$(echo "$INPUT" | jq -r '.prompt // empty')
 MEM=$(echo "$PROMPT" | grep -oE '(请记住|记住|remember)[:：]?[^。]{10,500}' | head -1 || true)
 if [ -n "$MEM" ]; then
   CLEAN=$(echo "$MEM" | sed -E 's/^(请记住|记住|remember)[:：]?[[:space:]]*//')
-  bash "$COMMON/ingest.sh" "$CLEAN" "preference" "chat" &
+  bash "$COMMON/ingest.sh" "$CLEAN" "preference" "remember" &
 fi
 
 # 2. 召回注入（带上 harness/hook 标识用于注入遥测）

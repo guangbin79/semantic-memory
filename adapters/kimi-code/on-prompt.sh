@@ -13,7 +13,7 @@ PROMPT=$(echo "$INPUT" | jq -r '.prompt // .message // .text // empty')
 MEM=$(echo "$PROMPT" | grep -oE '(请记住|记住|remember)[:：]?[^。]{10,500}' | head -1 || true)
 if [ -n "$MEM" ]; then
   CLEAN=$(echo "$MEM" | sed -E 's/^(请记住|记住|remember)[:：]?[[:space:]]*//')
-  bash "$COMMON/ingest.sh" "$CLEAN" "preference" "chat" &
+  bash "$COMMON/ingest.sh" "$CLEAN" "preference" "remember" &
 fi
 
 MEMORY_HARNESS="${MEMORY_HARNESS:-kimi-code}" MEMORY_HOOK="prompt" \

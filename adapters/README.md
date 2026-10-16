@@ -19,6 +19,10 @@ shared scripts here.
 - `recall.sh "query" [limit]` — prints a `<semantic-memory>` block on stdout
   (empty when no hits). Fail-open, 1.5s budget.
 - `ingest.sh "content" [kind] [source] [project]` — stores one memory. Fail-open.
+- Idle flush notification (`POST /idle`) is opencode-plugin-only (v2 `session.idle`
+  event). Shell adapters have no idle counterpart — their queued entries (chat/
+  compaction sources) flush via the batch threshold (pending ≥ 20) or `memory-mcp
+  distill` manually.
 
 Environment: `MEMORY_PLUGIN_URL` (default `http://127.0.0.1:8765`),
 `MEMORY_PLUGIN_TOKEN`, `MEMORY_PLUGIN_LIMIT`, `MEMORY_PLUGIN_BUDGET_CHARS` —
