@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS memories (
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL,
     deleted    INTEGER NOT NULL DEFAULT 0,
-    content_hash TEXT                            -- 摄取去重键（sha256[:32]）
+    content_hash TEXT,                           -- 摄取去重键（sha256[:32]）
+    injection_count INTEGER NOT NULL DEFAULT 0   -- 被注入次数（反哺热路径计数，record_injection 同事务自增；老库经 _migrate 回填）
 );
 -- 双 FTS 通道：porter 处理英文词干/标签，trigram 处理 CJK 子串（≥3 字符）。
 -- 中文连续文本在 porter 下会塌缩成单个大 token 导致不可检索，trigram 通道是中文召回的关键。
@@ -138,14 +139,24 @@ class _SerializedConn:
     def __init__(self, conn: sqlite3.Connection):
         self._conn = conn
         self._lock = threading.RLock()
+        # 本连接写代数：PRAGMA data_version 不反映同连接提交，向量缓存须自计。
+        # 多计只导致过度失效（多查一次），永不返旧数据——安全方向。
+        self.write_gen = 0
+
 
     def execute(self, *args, **kwargs) -> _SerializedCursor:
         with self._lock:
             return _SerializedCursor(self._conn.execute(*args, **kwargs))
 
+    def executemany(self, sql, params) -> None:
+        with self._lock:
+            cur = self._conn.executemany(sql, params)
+            cur.close()
+
     def executescript(self, *args, **kwargs) -> None:
         with self._lock:
             self._conn.executescript(*args, **kwargs)
+            self.write_gen += 1
 
     def __enter__(self) -> "_SerializedConn":
         self._lock.acquire()
@@ -157,10 +168,12 @@ class _SerializedConn:
             return self._conn.__exit__(*exc)
         finally:
             self._lock.release()
+            self.write_gen += 1  # 无条件多计：rollback 也失效缓存，只多查不返旧
 
     def commit(self) -> None:
         with self._lock:
             self._conn.commit()
+            self.write_gen += 1
 
     def rollback(self) -> None:
         with self._lock:
@@ -180,8 +193,25 @@ class MemoryStore:
         self.conn = _SerializedConn(raw)
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
+        had_fts = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='memories_fts'"
+        ).fetchone() is not None
         self.conn.executescript(SCHEMA)
+        if not had_fts:
+            self._rebuild_fts()  # legacy 行补进索引：外部内容表行不在索引内时，任何 UPDATE 触发器的 'delete' 都会损坏库
         self._migrate()
+        # 向量矩阵进程内缓存：key=(project,scope) → (uids, mat, data_version, write_gen)。
+        # ponytail: 个人规模（≤50k×4KB≈200MB/键）直接留驻内存，键数≤4；超规模再换 LRU。
+        self._vec_cache: dict[tuple, tuple] = {}
+
+    def _rebuild_fts(self) -> None:
+        """两通道 FTS 重建（新库无行时是零成本空扫）。
+
+        根因：外部内容表的 legacy 行从未入索引，UPDATE 触发器对其发 'delete' 命令
+        → sqlite 报 database disk image is malformed（3.37 实测）。建表后重建一次即根治。
+        """
+        self.conn.execute("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')")
+        self.conn.execute("INSERT INTO memories_fts_tri(memories_fts_tri) VALUES('rebuild')")
 
     def _migrate(self) -> None:
         """轻量迁移：为既有库补缺失列（content_hash + 会话/取代/使用度扩展列），索引始终确保。
@@ -210,6 +240,21 @@ class MemoryStore:
             ):
                 if col not in cols:
                     self.conn.execute(f"ALTER TABLE memories ADD COLUMN {col} {decl}")
+            # 反哺计数列：老库补列；回填拆独立事务（同事务 ALTER+触发器+json_each 子查询实测 sqlite3.37 报 malformed）
+            need_count_backfill = "injection_count" not in cols
+            if need_count_backfill:
+                self.conn.execute(
+                    "ALTER TABLE memories ADD COLUMN injection_count INTEGER NOT NULL DEFAULT 0")
+        if need_count_backfill:
+            # 反哺计数回填：聚合 json_each 后逐行 UPDATE（legacy 行已由 _rebuild_fts 入索引，触发器安全）
+            counts = self.conn.execute(
+                "SELECT j.value AS uid, COUNT(*) AS c FROM injections i, json_each(i.uids) j"
+                " GROUP BY j.value").fetchall()
+            with self.conn:
+                self.conn.executemany(
+                    "UPDATE memories SET injection_count=? WHERE uid=?",
+                    [(r["c"], r["uid"]) for r in counts],
+                )
 
     # ---------- 写入 ----------
 
@@ -455,11 +500,23 @@ class MemoryStore:
     def all_vectors(
         self, project: str | None = None, scope: str = "all"
     ) -> tuple[list[str], np.ndarray]:
-        """取出全部活向量用于暴力余弦（个人规模 <10k 条时亚毫秒级，无需 ANN）。
+        """取出全部活向量用于暴力余弦；带进程内缓存（读多写少的热路径主优化）。
 
-        scope='global' 只取 project IS NULL（全局域），'project' 排除 NULL；
-        这两档下 project 参数被忽略（IS NULL/IS NOT NULL 与 project = ? 不叠加）。
+        失效双轨：本连接写代数 write_gen + PRAGMA data_version（任何其它连接
+        提交都会推进，如 distill flush 的独立连接）。两代数都没变 → 直接返回
+        上次矩阵，免掉 fetchall+物化（实测 N=5k 约 58ms/次的主导成本）。
+        scope='global' 只取 project IS NULL，'project' 排除 NULL；
+        这两档下 project 参数被忽略。
         """
+        key = (project, scope)
+        try:
+            dv = self.conn.execute("PRAGMA data_version").fetchone()[0]
+        except sqlite3.Error:
+            dv = None
+        hit = self._vec_cache.get(key)
+        if hit is not None and hit[2] == dv and hit[3] == self.conn.write_gen:
+            return hit[0], hit[1]
+
         sql = (
             "SELECT v.uid, v.embedding FROM memories_vec v"
             " JOIN memories m ON m.uid = v.uid WHERE m.deleted = 0 AND m.superseded_by IS NULL"
@@ -471,15 +528,19 @@ class MemoryStore:
             params = (project,)
         rows = self.conn.execute(sql, params).fetchall()
         if np is None:
-            # 无 numpy 基座：不物化矩阵——库里有历史向量（旧向量版安装迁移而来）
-            # 也按“无向量”降级（cloud._scan 仅以云配置为门，非空行时 frombuffer 必崩）
+            # 无 numpy 基座：不物化矩阵（缓存该降级结果亦无害）
+            self._vec_cache[key] = ([], None, dv, self.conn.write_gen)
             return [], None
         if not rows:
-            return [], np.empty((0, 0), dtype=np.float32)
+            mat = np.empty((0, 0), dtype=np.float32)
+            self._vec_cache[key] = ([], mat, dv, self.conn.write_gen)
+            return [], mat
         uids = [r["uid"] for r in rows]
         mat = np.frombuffer(b"".join(r["embedding"] for r in rows), dtype=np.float32)
         dim = len(rows[0]["embedding"]) // 4
-        return uids, mat.reshape(len(rows), dim)
+        mat = mat.reshape(len(rows), dim)
+        self._vec_cache[key] = (uids, mat, dv, self.conn.write_gen)
+        return uids, mat
 
     def get_many(self, uids: list[str]) -> list[sqlite3.Row]:
         if not uids:
@@ -583,13 +644,19 @@ class MemoryStore:
         ts: float | None = None,
     ) -> int:
         with self.conn:  # 事务块整体持锁：last_insert_rowid 不会与别的线程交错
+            trimmed = uids[:50]
             self.conn.execute(
                 "INSERT INTO injections(ts, harness, hook, query, project, chars, uids)"
                 " VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (ts if ts is not None else time.time(),
                  harness[:64], hook[:64], query[:2000], project, max(0, int(chars)),
-                 json.dumps(uids[:50])),
+                 json.dumps(trimmed)),
             )
+            if trimmed:  # 反哺计数同事务自增：injection_counts 热路径免扫遥测表
+                marks = ",".join("?" * len(trimmed))
+                self.conn.execute(
+                    f"UPDATE memories SET injection_count = injection_count + 1"
+                    f" WHERE uid IN ({marks})", trimmed)
             return self.conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
 
     def list_injections(
@@ -614,16 +681,20 @@ class MemoryStore:
         return [dict(r) for r in self.conn.execute(sql, args)]
 
     def injection_counts(self, uids: list[str]) -> dict[str, int]:
-        """给定 uid 集合的历史注入次数（遥测反哺排序用）。"""
+        """给定 uid 集合的历史注入次数（遥测反哺排序用）。
+
+        读 memories.injection_count 计数列（record_injection 同事务维护，
+        老库迁移时自遥测回填）——每次召回不再对 injections 表做 json_each
+        全表 GROUP BY（遥测 TTL 90 天可达数万行，O(injections)/召回）。
+        """
         if not uids:
             return {}
         marks = ",".join("?" * len(uids))
         return {
-            r["value"]: r["c"]
+            r["uid"]: r["injection_count"]
             for r in self.conn.execute(
-                f"SELECT j.value, COUNT(*) c FROM injections,"
-                f" json_each(injections.uids) j WHERE j.value IN ({marks})"
-                f" GROUP BY j.value",
+                f"SELECT uid, injection_count FROM memories"
+                f" WHERE uid IN ({marks}) AND injection_count > 0",
                 uids,
             )
         }
