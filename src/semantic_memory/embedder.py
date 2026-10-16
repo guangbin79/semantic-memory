@@ -19,7 +19,9 @@ import logging
 import os
 import shutil
 import subprocess
+import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import Final
 
@@ -105,6 +107,10 @@ class Embedder:
         self.device: str | None = None  # 实际运行设备：cuda|cpu|None
         self._gguf_path = Path(model_path) if model_path else None
         self._model = None
+        # 首嵌并发门：ThreadingHTTPServer 多请求线程 + flush daemon 同时首嵌时，
+        # 避免双载 600MB 模型（Reranker/Distiller 经 ModelSlot 有锁，本类独居无槽）。
+        self._load_lock = threading.Lock()
+        self._model = None
         self.available = False
         if not HAS_NUMPY:
             log.warning("numpy 未安装，向量通道关闭（纯 BM25 模式）：%s", INSTALL_HINT)
@@ -132,29 +138,32 @@ class Embedder:
     def _ensure_loaded(self) -> None:
         if self._model is not None:
             return
-        if self.prefer == "cpu":
-            self._model = self._new_model(False)
-            probe = np.stack(self._model.embed(["device probe"]))
-            self.device = "cpu"
-        else:
-            _preload_cuda_libs()
-            try:
-                model = self._new_model(True)
-                probe = np.stack(model.embed(["device probe"]))
-                vram = _pid_vram_on_gpu(os.getpid())
-                if vram is None:
-                    raise RuntimeError(
-                        "CUDA 会话已建立但 nvidia-smi 无此 pid 显存——"
-                        "判定为静默 CPU 回退，拒绝声称 GPU"
-                    )
-                self._model, self.device = model, "cuda"
-                log.info("嵌入器运行于 GPU: pid=%s vram=%s", os.getpid(), vram)
-            except Exception as exc:
-                log.warning("GPU 初始化失败（%s: %s）——回退 CPU 嵌入器",
-                            type(exc).__name__, exc)
+        with self._load_lock:  # 双检：并发首嵌只加载一次，其余等锁后复用
+            if self._model is not None:
+                return
+            if self.prefer == "cpu":
                 self._model = self._new_model(False)
                 probe = np.stack(self._model.embed(["device probe"]))
                 self.device = "cpu"
+            else:
+                _preload_cuda_libs()
+                try:
+                    model = self._new_model(True)
+                    probe = np.stack(model.embed(["device probe"]))
+                    vram = _pid_vram_on_gpu(os.getpid())
+                    if vram is None:
+                        raise RuntimeError(
+                            "CUDA 会话已建立但 nvidia-smi 无此 pid 显存——"
+                            "判定为静默 CPU 回退，拒绝声称 GPU"
+                        )
+                    self._model, self.device = model, "cuda"
+                    log.info("嵌入器运行于 GPU: pid=%s vram=%s", os.getpid(), vram)
+                except Exception as exc:
+                    log.warning("GPU 初始化失败（%s: %s）——回退 CPU 嵌入器",
+                                type(exc).__name__, exc)
+                    self._model = self._new_model(False)
+                    probe = np.stack(self._model.embed(["device probe"]))
+                    self.device = "cpu"
         assert probe.shape == (1, self.dim), (
             f"{MODEL_NAME} 嵌入维度 {probe.shape}，期望 (1, {self.dim})"
         )
