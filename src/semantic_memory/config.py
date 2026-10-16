@@ -101,6 +101,7 @@ class Config:
 
     # ---- 服务发现（agent 自举：MEMORY_PORT=0 随机端口时靠它找到服务）----
     discovery_file: Path | None  # 启动后写入 {url,port,pid,...}；None = 不写
+    allow_bm25_only: bool       # 启动门恒放行开关（任务 9/R2）：纯 BM25 显式合法
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -190,4 +191,7 @@ class Config:
             cloud_daily_max_tokens=int(s("MEMORY_CLOUD_DAILY_MAX_TOKENS", "cloud_daily_max_tokens", "200000")),
             cloud_batch_n=int(s("MEMORY_CLOUD_BATCH_N", "cloud_batch_n", "30")),
             discovery_file=discovery_file,
+            allow_bm25_only=_bool(
+                "MEMORY_ALLOW_BM25_ONLY", "allow_bm25_only",
+                False, lambda v: v == "1"),
         )

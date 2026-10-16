@@ -18,7 +18,7 @@
  *   8. A4：stable 线 ctx.tool.transform 注册恰 2 个原生工具（memory_store/memory_recall，
  *      input 为 JSON Schema）；store→POST /ingest（body.source=remember、project 用 stable
  *      线变量、input.text→body.content）；recall→POST /recall（query/limit 透传）；
- *      fetch reject→返回 "memory service unreachable" 错误串绝不 throw（独立 10s 超时面）。
+ *      fetch reject→返回不可达错误串（含 setup 提示）绝不 throw（独立 10s 超时面）。
  *
  * 运行：MEMORY_PLUGIN_URL=http://127.0.0.1:8766 MEMORY_PLUGIN_TOOL_CAPTURE=bash \
  *       MEMORY_DB_PATH=/tmp/xxx.db node test-hooks.mjs
@@ -519,12 +519,12 @@ try {
   assert.equal(rec.body.limit, 3);
   console.log("ok  工具转发: store→/ingest(source=remember,project) 且 input.text→body.content；recall→/recall(query/limit)");
 
-  // fetch reject → 返回 "memory service unreachable" 错误串，绝不 throw（fail-open）
+  // fetch reject → 返回不可达错误串（含 setup 提示），绝不 throw（fail-open）
   globalThis.fetch = async () => { throw new TypeError("fetch failed"); };
   const dres = await storeTool.execute({ text: "x" }, toolCtx);
-  assert.equal(dres.content, "memory service unreachable", "store 服务不可达应返回错误串");
+  assert.equal(dres.content, "memory service unreachable (run semantic-memory setup)", "store 服务不可达应返回错误串");
   const dres2 = await recallTool.execute({ query: "x" }, toolCtx);
-  assert.equal(dres2.content, "memory service unreachable", "recall 服务不可达应返回错误串");
+  assert.equal(dres2.content, "memory service unreachable (run semantic-memory setup)", "recall 服务不可达应返回错误串");
   console.log("ok  fail-open: fetch reject 返回 memory service unreachable 错误串，不 throw");
 } finally {
   globalThis.fetch = realFetch;

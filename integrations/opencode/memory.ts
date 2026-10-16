@@ -28,7 +28,7 @@
  *                   tags 可选；→ POST /ingest {content,kind,source:"remember",project}。
  *   memory_recall — 检索记忆。input：query 必填，limit 可选；→ POST /recall {query,limit}。
  * 工具转发走独立 10s 超时（不与 hooks 的 1.5s 共用——工具调用值得等模型/DB），
- * 服务不可达返回 "memory service unreachable" 错误串、绝不 throw（fail-open）。
+ * 服务不可达返回 "memory service unreachable (run semantic-memory setup)" 错误串、绝不 throw（fail-open）。
  * dev/legacy 线无 tool.transform 面，不注册（见 control() 稳定线判定）。
  *
  * 设计约束（勿破坏）：
@@ -154,7 +154,7 @@ async function postTool(path: string, body: unknown): Promise<string> {
     if (!res.ok) return `memory service error (HTTP ${res.status})`;
     return JSON.stringify(await res.json());
   } catch {
-    return "memory service unreachable"; // 服务未启动 / 超时 / 网络异常：错误串降级
+    return "memory service unreachable (run semantic-memory setup)"; // 服务未启动 / 超时 / 网络异常：错误串降级+安装提示
   }
 }
 
@@ -565,7 +565,7 @@ async function control(ctx: StableCtx, options?: Record<string, unknown>): Promi
       /**
        * 原生记忆工具（A4/D9，仅 stable 线——dev/legacy 线无 tool.transform 面，跳过）。
        * input 为纯 JSON Schema；转发走 postTool 独立 10s 超时；服务不可达返回
-       * "memory service unreachable" 错误串、绝不 throw（工具面 fail-open）。
+       * "memory service unreachable (run semantic-memory setup)" 错误串、绝不 throw（工具面 fail-open）。
        */
       if (typeof ctx.tool?.transform === "function") {
         await ctx.tool.transform((editor) => {

@@ -50,6 +50,7 @@ from .project import backfill_project_keys, resolve_project
 from .modelslot import ModelSlot
 from .paths import MigrationRefused, migrate_legacy
 from .reranker import Reranker
+from .startup_gate import check_startup
 
 log = logging.getLogger("semantic_memory")
 
@@ -752,6 +753,11 @@ def main() -> None:
     if cmd == "distill":  # 触发器三路：手动 flush（同步跑完打印报告）
         print(json.dumps(flush_distill_queue(store, distiller, embedder=embedder), ensure_ascii=False))
         return
+
+    # ---- 分层严格启动门（任务 9/R2）：拒启必须先于端口绑定 ----
+    gate = check_startup(cfg)
+    if gate:
+        raise SystemExit(gate)
 
     # ---- serve：启动维护钩子（频率=服务重启，天级粒度足够）----
     if cfg.maintenance_on_start:
