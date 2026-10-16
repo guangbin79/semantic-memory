@@ -55,11 +55,11 @@ class Config:
         model = os.environ.get("MEMORY_MODEL_PATH")
         # 门禁 PASSED（.omo/evidence/rerank-gate.md 2026-10-16：recall@5 0.939≥基线 0.909）
         # 后默认启用：未设 → 常规路径（文件存在即生效，缺失则优雅关闭并告警）；显式设空 = 关闭
-        _data_home = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share")))
+        _data_home = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share")  # XDG 规范：设但空串也回退
         rerank_model = os.environ.get(
             "MEMORY_RERANK_MODEL",
             str(_data_home / "memory-mcp/models/qwen3-reranker-0.6b-q8_0.gguf"),
-        )
+        ).strip()  # dotenv/CI 常见尾随空白；与下方 strip 判空保持检查/取值一致
         distill_model = os.environ.get("MEMORY_DISTILL_MODEL")
         db_path = Path(os.environ.get("MEMORY_DB_PATH", _default_db()))
         discovery = os.environ.get("MEMORY_DISCOVERY_FILE")

@@ -6,4 +6,4 @@ config 默认在门禁 PASSED 后指向常规模型路径（config.py 注释）�
 """
 import os
 
-os.environ["MEMORY_RERANK_MODEL"] = ""  # noqa: E402 —— 必须在 import memory_mcp 前生效
+os.environ.setdefault("MEMORY_RERANK_MODEL", "")  # 未设→关闭保封闭性（防真模型意外加载）；显式指定→保留 opt-in
