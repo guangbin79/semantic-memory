@@ -23,8 +23,11 @@ INDEX_HTML = """<!DOCTYPE html>
   .stat b { color: #58a6ff; font-size: 18px; display: block; }
   .stat span { color: #8b949e; font-size: 11px; }
   form { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
-  input, select { background: #0d1117; border: 1px solid #30363d; color: #c9d1d9;
+input, select { background: #0d1117; border: 1px solid #30363d; color: #c9d1d9;
                   border-radius: 6px; padding: 6px 10px; font: inherit; }
+  input#q { flex: 1; min-width: 220px; }
+  .chk { display: flex; align-items: center; gap: 4px; color: #8b949e; font-size: 12px; }
+  input[type="checkbox"] { width: auto; padding: 0; }
   input#q { flex: 1; min-width: 220px; }
   button { background: #238636; border: 0; color: #fff; border-radius: 6px;
            padding: 6px 14px; cursor: pointer; font: inherit; }
@@ -42,6 +45,8 @@ INDEX_HTML = """<!DOCTYPE html>
   #status { color: #8b949e; font-size: 12px; margin: 8px 0; }
   .maint { margin-bottom: 16px; display: flex; gap: 8px; align-items: center; }
   #maint-status { color: #3fb950; font-size: 12px; }
+  .stat b.warn { color: #e3b341; }
+  .stat b.hot { color: #f85149; }
 </style>
 </head>
 <body>
@@ -69,6 +74,7 @@ INDEX_HTML = """<!DOCTYPE html>
   <select id="kind"><option value="">全部 kind</option>
     <option>fact</option><option>decision</option><option>preference</option><option>artifact</option></select>
   <input id="project" placeholder="project 过滤" size="12">
+  <label class="chk" title="召回结果追加全局（project=NULL）记忆，配额 2 条"><input type="checkbox" id="global"> 含全局</label>
   <button type="submit">检索</button>
   <button type="button" class="ghost" id="recent">最近</button>
 </form>
@@ -97,13 +103,18 @@ const fmt = ts => ts ? new Date(ts * 1000).toLocaleString('zh-CN', {hour12: fals
 async function loadStats() {
   const s = await api('/api/stats');
   $('stats').innerHTML = '';
-  const items = [['总条目', s.total], ['已向量化', s.vectorized],
+  const p95 = s.recall_p95_ms || 0;
+  // 延迟三色徽章：正常 / 警告(p95>800ms) / 红(p95>1200ms 或条目>4万近暴力扫天花板)
+  const badge = (p95 > 1200 || (s.entries || 0) > 40000) ? 'hot' : p95 > 800 ? 'warn' : '';
+  const items = [['总条目', s.entries ?? s.total], ['已向量化', s.vectorized],
     ['库体积', (s.db_bytes / 1048576).toFixed(1) + ' MB'],
     ['向量通道', s.embedder ? (s.device || 'on') : 'BM25-only'],
+    ['召回 p50 ms', s.recall_p50_ms], ['召回 p95 ms', s.recall_p95_ms, badge],
+    ['蒸馏队列', s.distill_queue_len], ['云调用(24h)', s.cloud_calls_24h],
     ...Object.entries(s.by_kind || {})];
-  for (const [k, v] of items) {
+  for (const [k, v, cls] of items) {
     const d = document.createElement('div'); d.className = 'stat';
-    const b = document.createElement('b'); b.textContent = v;
+    const b = document.createElement('b'); b.textContent = v; if (cls) b.className = cls;
     const sp = document.createElement('span'); sp.textContent = k;
     d.append(b, sp); $('stats').appendChild(d);
   }
@@ -176,7 +187,8 @@ async function recent() {
 }
 async function search(q) {
   render((await api('/recall', {method: 'POST',
-    body: JSON.stringify({query: q, limit: 20, project: $('project').value || undefined})})).hits, true);
+    body: JSON.stringify({query: q, limit: 20, project: $('project').value || undefined,
+      global_limit: $('global').checked ? 2 : 0})})).hits, true);
 }
 async function refresh() { await loadStats(); await loadInjections(); await recent(); }
 $('f').onsubmit = e => { e.preventDefault(); $('q').value.trim() ? search($('q').value.trim()) : recent(); };
