@@ -150,7 +150,7 @@ Service:
 | `MEMORY_RECALL_MIN_COSINE` | `0.45` | Cosine floor for vector-only hits (BM25 hits always pass); `0` = off |
 | `MEMORY_RECALL_MAX_COSINE` | `0.92` | Redundancy ceiling: vector-only hits above this drop as redundant (BM25 unaffected); `1.0` = off |
 | `MEMORY_INJECT_BOOST` | `0.15` | Telemetry feedback: score × (1 + α·ln(1+injections)); `0` = off |
-| `MEMORY_RERANK_MODEL` | empty | Reranker GGUF (**ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF only** — official conversion, community builds may lack the rank head); empty = rerank off (RRF order) |
+| `MEMORY_RERANK_MODEL` | `<data>/memory-mcp/models/qwen3-reranker-0.6b-q8_0.gguf` | Reranker GGUF (**ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF only** — official conversion, community builds may lack the rank head); default = conventional path (gate PASSED 2026-10-16: recall@5 0.939 vs 0.909 baseline) — on when the file exists, graceful off + warning when missing; set empty to disable |
 | `MEMORY_RERANK_CANDIDATES` | `20` | Top-N RRF candidates fed to the reranker |
 | `MEMORY_RERANK_BUDGET_MS` | `500` | Total rerank budget per recall (incl. model-slot load); exceeded = fail-open to RRF order |
 
@@ -410,12 +410,15 @@ still earns a score. Post-fusion steps:
 - **Redundancy ceiling** (`MEMORY_RECALL_MAX_COSINE=0.92`): a vector-only hit
   whose cosine exceeds the ceiling is dropped as redundant ("too near = already
   known"); BM25 hits pass untouched; `1.0` = off.
-- **Local rerank** (`MEMORY_RERANK_MODEL`, **off by default**): the top
-  `MEMORY_RERANK_CANDIDATES=20` RRF candidates are re-scored by
-  Qwen3-Reranker-0.6B (completions logprobs, yes/no softmax) within a hard
+- **Local rerank** (`MEMORY_RERANK_MODEL`, **on by default** since the gate
+  PASSED 2026-10-16 — recall@5 0.939 vs 0.909 RRF baseline, recall@1 +21pp on a
+  33-query golden set): the top `MEMORY_RERANK_CANDIDATES=20` RRF candidates
+  are re-scored by Qwen3-Reranker-0.6B (greedy completion + sampling-row
+  yes/no softmax, ~13ms/candidate on GPU) within a hard
   `MEMORY_RERANK_BUDGET_MS=500` budget that includes model-slot load; over
   budget or any error → RRF order stands (fail-open). Ties break by `updated_at`
-  desc. It stays off until offline eval proves it on a real golden set (below).
+  desc. The default points at the conventional model path — set `MEMORY_RERANK_MODEL=`
+  (empty) to disable.
 
 ## Capacity & alerting (observability, not interruptions)
 

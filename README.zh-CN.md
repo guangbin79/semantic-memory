@@ -135,7 +135,7 @@ cp opencode-plugin/memory.ts ~/.config/opencode/plugins/
 | `MEMORY_RECALL_MIN_COSINE` | `0.45` | 纯向量命中的余弦门限（BM25 命中恒放行）；`0` = 关闭 |
 | `MEMORY_RECALL_MAX_COSINE` | `0.92` | 冗余上限：纯向量命中超过此值按冗余出局（BM25 不受影响）；`1.0` = 关闭 |
 | `MEMORY_INJECT_BOOST` | `0.15` | 遥测反哺：score × (1 + α·ln(1+注入次数))；`0` = 关闭 |
-| `MEMORY_RERANK_MODEL` | 空 | 重排 GGUF（**仅 ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF**——官方转换，社区镜像可能缺 rank 头）；空 = 重排关闭（RRF 序直出） |
+| `MEMORY_RERANK_MODEL` | `<数据目录>/memory-mcp/models/qwen3-reranker-0.6b-q8_0.gguf` | 重排 GGUF（**仅 ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF**——官方转换，社区镜像可能缺 rank 头）；默认指向常规路径（门禁 2026-10-16 PASSED：recall@5 0.939 vs 基线 0.909）——文件在即启用，缺失优雅关闭并告警；设空禁用 |
 
 **云通道隐私。** 配置 `MEMORY_CLOUD_BASE_URL` + `MEMORY_CLOUD_API_KEY` + `MEMORY_CLOUD_MODEL`（且 `MEMORY_CLOUD_ENABLED` ≠ `0`，默认）即意味着**记忆内容会发送至该端点**——经确定性预过滤的近邻簇成员及其直接邻域，绝非全库。云端只返回**元数据操作计划**（按 uid 的 `supersede`/`touch`）：云生成的任何内容都不入库，计划中出现疑似注入模式即整批丢弃。每日硬顶（`MEMORY_CLOUD_DAILY_MAX_CALLS` / `MEMORY_CLOUD_DAILY_MAX_TOKENS`）是进程内存计数——**服务重启即重置**。`MEMORY_CLOUD_ENABLED=0` 是优先级最高的 kill switch。
 | `MEMORY_RERANK_CANDIDATES` | `20` | RRF 融合后送入重排的候选条数 |
@@ -312,11 +312,13 @@ RRF 只编码名次，不编码相关强度——"无相关里的最近邻"也�
   翻转相邻名次。
 - **冗余上限**（`MEMORY_RECALL_MAX_COSINE=0.92`）：纯向量命中余弦超过上限即按
   冗余出局（"过近 = 已知"）；BM25 命中不受影响；`1.0` = 关闭。
-- **本地重排**（`MEMORY_RERANK_MODEL`，**默认关**）：RRF 融合后 top
-  `MEMORY_RERANK_CANDIDATES=20` 条由 Qwen3-Reranker-0.6B 重打分（completions
-  logprobs，yes/no softmax），硬预算 `MEMORY_RERANK_BUDGET_MS=500`（含模型槽
-  加载）；超预算或任何错误 → 保 RRF 序（fail-open）。同分按 `updated_at` 倒序
-  平决。离线评测在真实 golden 集上证明有效之前保持关闭（见下）。
+- **本地重排**（`MEMORY_RERANK_MODEL`，**门禁 2026-10-16 PASSED 后默认开**——
+  33 条 golden 集 recall@5 0.939 vs 基线 0.909，recall@1 +21pp）：RRF 融合后
+  top `MEMORY_RERANK_CANDIDATES=20` 条由 Qwen3-Reranker-0.6B 重打分（贪心补全
+  + 采样分布行 yes/no softmax，GPU 实测 ~13ms/候选），硬预算
+  `MEMORY_RERANK_BUDGET_MS=500`（含模型槽加载）；超预算或任何错误 → 保 RRF 序
+  （fail-open）。同分按 `updated_at` 倒序平决。默认指向常规模型路径——设
+  `MEMORY_RERANK_MODEL=`（空）可禁用。
 
 ## 容量与告警（观测面，不打扰会话）
 
