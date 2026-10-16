@@ -38,6 +38,7 @@ def hybrid_recall(
     reranker: Reranker | None = None,
     rerank_candidates: int = 20,
     scope: str = "all",
+    query_vec=None,  # 预算好的查询向量（双路召回复用，免每路重嵌一次）
 ) -> list[dict]:
     """主召回入口。向量通道可用时双路融合，否则纯 BM25。
 
@@ -67,7 +68,7 @@ def hybrid_recall(
     # 通道 2：向量余弦（暴力，~50k 条内亚毫秒；查询侧自动带 Instruct 前缀）
     vec_ranked: list[str] = []
     cos_map: dict[str, float] = {}
-    q = embedder.embed_query(query)
+    q = query_vec if query_vec is not None else embedder.embed_query(query)
     if q is not None:
         uids, mat = store.all_vectors(project=project, scope=scope)
         if len(uids):
