@@ -82,9 +82,26 @@ CREATE TABLE IF NOT EXISTS injections (
     uids    TEXT NOT NULL DEFAULT '[]'  -- JSON 数组：本次注入的记忆 uid
 );
 CREATE INDEX IF NOT EXISTS idx_injections_ts ON injections(ts);
+-- 蒸馏队列：写入侧异步蒸馏的落盘缓冲（flush 前持久，崩溃不丢）。
+CREATE TABLE IF NOT EXISTS distill_queue (
+    id         INTEGER PRIMARY KEY,
+    content    TEXT,
+    source     TEXT,
+    project    TEXT,
+    session_id TEXT,
+    created_at REAL,
+    status     TEXT DEFAULT 'pending'
+);
 """
 
 VALID_KINDS = {"fact", "decision", "preference", "artifact"}
+
+# memories 写入 SQL：store() 与 flush_distill_queue（独立连接）共用，FTS 由触发器同步
+INSERT_MEMORY_SQL = (
+    "INSERT INTO memories(uid, content, kind, source, project, tags,"
+    " created_at, updated_at, content_hash, session_id)"
+    " VALUES (?,?,?,?,?,?,?,?,?,?)"
+)
 
 
 class _SerializedCursor:
@@ -167,7 +184,7 @@ class MemoryStore:
         self._migrate()
 
     def _migrate(self) -> None:
-        """轻量迁移：为既有库补 content_hash 列（摄取去重键），索引始终确保。
+        """轻量迁移：为既有库补缺失列（content_hash + 会话/取代/使用度扩展列），索引始终确保。
 
         索引不在 SCHEMA 里建——旧库缺列时 CREATE INDEX 会在列添加之前失败。
         """
@@ -184,6 +201,15 @@ class MemoryStore:
                 "CREATE INDEX IF NOT EXISTS idx_memories_hash"
                 " ON memories(content_hash) WHERE deleted=0"
             )
+            # 扩展列：会话身份 / 召回打点 / 取代链（老库补列，已有列跳过保证幂等）
+            for col, decl in (
+                ("session_id", "TEXT"),
+                ("last_recalled_at", "REAL"),
+                ("superseded_by", "TEXT"),
+                ("superseded_at", "REAL"),
+            ):
+                if col not in cols:
+                    self.conn.execute(f"ALTER TABLE memories ADD COLUMN {col} {decl}")
 
     # ---------- 写入 ----------
 
@@ -195,6 +221,7 @@ class MemoryStore:
         project: str | None = None,
         tags: list[str] | None = None,
         embedding: np.ndarray | None = None,
+        session_id: str | None = None,
     ) -> str:
         if kind not in VALID_KINDS:
             raise ValueError(f"invalid kind {kind!r}, expected one of {sorted(VALID_KINDS)}")
@@ -202,11 +229,9 @@ class MemoryStore:
         now = time.time()
         with self.conn:
             self.conn.execute(
-                "INSERT INTO memories(uid, content, kind, source, project, tags,"
-                " created_at, updated_at, content_hash)"
-                " VALUES (?,?,?,?,?,?,?,?,?)",
+                INSERT_MEMORY_SQL,
                 (uid, content, kind, source, project, json.dumps(tags or [], ensure_ascii=False),
-                 now, now, content_hash(content)),
+                 now, now, content_hash(content), session_id),
             )
             if embedding is not None:
                 vec = np.asarray(embedding, dtype=np.float32)
@@ -226,7 +251,26 @@ class MemoryStore:
             self.conn.execute("DELETE FROM memories_vec WHERE uid=?", (uid,))
         return cur.rowcount > 0
 
+    # ---------- 蒸馏队列（写入侧缓冲；flush 见 lifecycle.flush_distill_queue） ----------
+
+    def distill_enqueue(self, content: str, source: str, project: str | None,
+                        session_id: str | None = None) -> int:
+        """入队 pending 行（flush 前持久，崩溃不丢），返回当前 pending 总数。"""
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO distill_queue(content, source, project, session_id, created_at, status)"
+                " VALUES (?,?,?,?,?,'pending')",
+                (content, source, project, session_id, time.time()),
+            )
+            return self.distill_pending()
+
     # ---------- 去重与维护（维护面：启动钩子/CLI，不经 MCP 工具暴露） ----------
+
+    def distill_pending(self) -> int:
+        """当前 pending 行数（观测面只读）。"""
+        return self.conn.execute(
+            "SELECT COUNT(*) c FROM distill_queue WHERE status='pending'"
+        ).fetchone()["c"]
 
     def find_by_hash(self, h: str) -> sqlite3.Row | None:
         return self.conn.execute(
@@ -236,32 +280,100 @@ class MemoryStore:
 
     def touch(self, uid: str) -> None:
         """去重命中：刷新时间戳（等价于'这条记忆再次被证实相关'）。"""
+        now = time.time()
         with self.conn:
             self.conn.execute(
-                "UPDATE memories SET updated_at=? WHERE uid=?", (time.time(), uid)
+                "UPDATE memories SET updated_at=?, last_recalled_at=? WHERE uid=?",
+                (now, now, uid),
             )
 
-    def purge_soft_deleted(self) -> int:
-        """硬删软删除条目，真正回收空间（向量在 forget 时已移除）。"""
-        with self.conn:
-            cur = self.conn.execute("DELETE FROM memories WHERE deleted=1")
-        return cur.rowcount
-
-    def purge_older_than(self, kind: str, cutoff_ts: float) -> int:
-        """TTL 硬清：指定 kind 且创建时间早于 cutoff 的活条目。DELETE 触发器同步 FTS。"""
-        uids = [
-            r["uid"]
+    def distinct_projects(self) -> list[str]:
+        """memories 与 injections 两表的全部非空 project 值（回填迁移用）。"""
+        return [
+            r[0]
             for r in self.conn.execute(
-                "SELECT uid FROM memories WHERE kind=? AND deleted=0 AND created_at<?",
-                (kind, cutoff_ts),
+                "SELECT DISTINCT project FROM memories WHERE project IS NOT NULL"
+                " UNION SELECT DISTINCT project FROM injections WHERE project IS NOT NULL"
             )
         ]
+
+    def rename_project(self, old: str, new: str) -> int:
+        """project 键批量改写：memories 与 injections 同事务（回填迁移用）。"""
+        with self.conn:
+            c1 = self.conn.execute(
+                "UPDATE memories SET project=? WHERE project=?", (new, old)).rowcount
+            c2 = self.conn.execute(
+                "UPDATE injections SET project=? WHERE project=?", (new, old)).rowcount
+        return c1 + c2
+
+    def purge_soft_deleted(self, dry_run: bool = False) -> dict:
+        """硬删软删除条目，真正回收空间（dry_run 只统计不动库）。返回 {count, bytes}。"""
+        rows = self.conn.execute(
+            "SELECT uid, LENGTH(CAST(content AS BLOB)) AS nbytes FROM memories WHERE deleted=1"
+        ).fetchall()
+        stats = {"count": len(rows), "bytes": sum(r["nbytes"] or 0 for r in rows)}
+        if stats["count"] and not dry_run:
+            with self.conn:
+                self.conn.execute("DELETE FROM memories WHERE deleted=1")
+        return stats
+
+    def purge_older_than(self, kind: str, cutoff_ts: float, dry_run: bool = False) -> dict:
+        """TTL 硬清：指定 kind 且创建时间早于 cutoff 的活条目（dry_run 只统计）。
+
+        DELETE 触发器同步 FTS。返回 {count, bytes}。
+        """
+        rows = self.conn.execute(
+            "SELECT uid, LENGTH(CAST(content AS BLOB)) AS nbytes FROM memories"
+            " WHERE kind=? AND deleted=0 AND created_at<?",
+            (kind, cutoff_ts),
+        ).fetchall()
+        stats = {"count": len(rows), "bytes": sum(r["nbytes"] or 0 for r in rows)}
+        if not rows or dry_run:
+            return stats
+        uids = [r["uid"] for r in rows]
+        marks = ",".join("?" * len(uids))
+        with self.conn:
+            self.conn.execute(f"DELETE FROM memories_vec WHERE uid IN ({marks})", uids)
+            self.conn.execute(f"DELETE FROM memories WHERE uid IN ({marks})", uids)
+        return stats
+
+    def stamp_recalled(self, uids: list[str]) -> int:
+        """注入上报：被注入=被召回，刷新 last_recalled_at（留存计时的豁免凭证）。"""
+        if not uids:
+            return 0
+        marks = ",".join("?" * len(uids))
+        with self.conn:
+            cur = self.conn.execute(
+                f"UPDATE memories SET last_recalled_at=?"
+                f" WHERE uid IN ({marks}) AND deleted=0",
+                (time.time(), *uids),
+            )
+        return cur.rowcount
+
+    def stale_candidates(self, cutoff_ts: float) -> list[sqlite3.Row]:
+        """使用度留存候选：fact/artifact 超期未召回（NULL 视为 created_at）或已被取代。
+
+        preference/decision 永久豁免（即使超期未召回）。
+        """
+        return self.conn.execute(
+            "SELECT uid, kind, LENGTH(CAST(content AS BLOB)) AS nbytes FROM memories"
+            " WHERE deleted=0 AND kind IN ('fact','artifact')"
+            " AND (superseded_by IS NOT NULL OR COALESCE(last_recalled_at, created_at) < ?)",
+            (cutoff_ts,),
+        ).fetchall()
+
+    def soft_delete_uids(self, uids: list[str]) -> int:
+        """按 uid 批量软删除（FTS 走 UPDATE 触发器同步，向量直接移除）。"""
         if not uids:
             return 0
         marks = ",".join("?" * len(uids))
         with self.conn:
             self.conn.execute(f"DELETE FROM memories_vec WHERE uid IN ({marks})", uids)
-            cur = self.conn.execute(f"DELETE FROM memories WHERE uid IN ({marks})", uids)
+            cur = self.conn.execute(
+                f"UPDATE memories SET deleted=1, updated_at=?"
+                f" WHERE uid IN ({marks}) AND deleted=0",
+                (time.time(), *uids),
+            )
         return cur.rowcount
 
     def entries_without_vectors(self, limit: int = 500) -> list[sqlite3.Row]:
@@ -284,7 +396,18 @@ class MemoryStore:
 
     # ---------- 读取 ----------
 
-    def fts_search(self, query: str, limit: int) -> list[tuple[str, float]]:
+    @staticmethod
+    def _scope_cond(scope: str) -> str:
+        """scope 过滤片段（'project'|'global'|'all'）：拼进 WHERE，不带参数。"""
+        if scope == "global":
+            return " AND m.project IS NULL"
+        if scope == "project":
+            return " AND m.project IS NOT NULL"
+        if scope == "all":
+            return ""
+        raise ValueError(f"invalid scope {scope!r}, expected 'all'|'project'|'global'")
+
+    def fts_search(self, query: str, limit: int, scope: str = "all") -> list[tuple[str, float]]:
         """双通道 BM25 检索，返回 [(uid, best_rank)]，rank 越小越好。
 
         porter 通道：英文词干 + 标签；trigram 通道：CJK/子串（仅 ≥3 字符的词）。
@@ -297,10 +420,11 @@ class MemoryStore:
         best: dict[str, float] = {}
 
         rows = self.conn.execute(
-            """
+            f"""
             SELECT m.uid, bm25(memories_fts) AS r
             FROM memories_fts f JOIN memories m ON m.id = f.rowid
-            WHERE memories_fts MATCH ? AND m.deleted = 0
+            WHERE memories_fts MATCH ? AND m.deleted = 0 AND m.superseded_by IS NULL
+            {self._scope_cond(scope)}
             ORDER BY r LIMIT ?
             """,
             (fts_query, limit),
@@ -312,10 +436,11 @@ class MemoryStore:
         if tri_terms:
             tri_query = " OR ".join(f'"{t}"' for t in tri_terms)
             rows = self.conn.execute(
-                """
+                f"""
                 SELECT m.uid, bm25(memories_fts_tri) AS r
                 FROM memories_fts_tri f JOIN memories m ON m.id = f.rowid
-                WHERE memories_fts_tri MATCH ? AND m.deleted = 0
+                WHERE memories_fts_tri MATCH ? AND m.deleted = 0 AND m.superseded_by IS NULL
+                {self._scope_cond(scope)}
                 ORDER BY r LIMIT ?
                 """,
                 (tri_query, limit),
@@ -327,14 +452,21 @@ class MemoryStore:
 
         return sorted(best.items(), key=lambda kv: kv[1])[:limit]
 
-    def all_vectors(self, project: str | None = None) -> tuple[list[str], np.ndarray]:
-        """取出全部活向量用于暴力余弦（个人规模 <10k 条时亚毫秒级，无需 ANN）。"""
+    def all_vectors(
+        self, project: str | None = None, scope: str = "all"
+    ) -> tuple[list[str], np.ndarray]:
+        """取出全部活向量用于暴力余弦（个人规模 <10k 条时亚毫秒级，无需 ANN）。
+
+        scope='global' 只取 project IS NULL（全局域），'project' 排除 NULL；
+        这两档下 project 参数被忽略（IS NULL/IS NOT NULL 与 project = ? 不叠加）。
+        """
         sql = (
             "SELECT v.uid, v.embedding FROM memories_vec v"
-            " JOIN memories m ON m.uid = v.uid WHERE m.deleted = 0"
+            " JOIN memories m ON m.uid = v.uid WHERE m.deleted = 0 AND m.superseded_by IS NULL"
+            + self._scope_cond(scope)
         )
         params: tuple = ()
-        if project:
+        if project and scope == "all":
             sql += " AND m.project = ?"
             params = (project,)
         rows = self.conn.execute(sql, params).fetchall()
@@ -350,8 +482,8 @@ class MemoryStore:
             return []
         marks = ",".join("?" * len(uids))
         rows = self.conn.execute(
-            f"SELECT uid, content, kind, source, project, tags, created_at FROM memories"
-            f" WHERE uid IN ({marks}) AND deleted = 0",
+            f"SELECT uid, content, kind, source, project, tags, created_at, updated_at FROM memories"
+            f" WHERE uid IN ({marks}) AND deleted = 0 AND superseded_by IS NULL",
             uids,
         ).fetchall()
         order = {u: i for i, u in enumerate(uids)}
@@ -492,10 +624,15 @@ class MemoryStore:
             )
         }
 
-    def purge_injections_before(self, cutoff_ts: float) -> int:
-        cur = self.conn.execute("DELETE FROM injections WHERE ts < ?", (cutoff_ts,))
-        self.conn.commit()
-        return cur.rowcount
+    def purge_injections_before(self, cutoff_ts: float, dry_run: bool = False) -> dict:
+        """注入遥测 TTL（dry_run 只统计）。返回 {count, bytes=0}（遥测行不计内容字节）。"""
+        count = self.conn.execute(
+            "SELECT COUNT(*) c FROM injections WHERE ts < ?", (cutoff_ts,)
+        ).fetchone()["c"]
+        if count and not dry_run:
+            self.conn.execute("DELETE FROM injections WHERE ts < ?", (cutoff_ts,))
+            self.conn.commit()
+        return {"count": count, "bytes": 0}
 
     def injection_stats(self) -> dict:
         total = self.conn.execute("SELECT COUNT(*) c FROM injections").fetchone()["c"]

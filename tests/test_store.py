@@ -106,3 +106,73 @@ def test_fts_special_chars_no_crash(store, no_embedder):
     # 特殊字符查询不应抛异常
     hits = hybrid_recall(store, no_embedder, 'C++ "Qt" (compile)', limit=5)
     assert isinstance(hits, list)
+
+def test_superseded_filtered_in_recall_but_visible_in_admin(store, no_embedder):
+    """被取代条目：召回面（fts/向量/get_many）不可见，管理面（list_page）仍可见。"""
+    emb = np.eye(8, dtype=np.float32)[0]
+    old = store.store("prefer pip for installing deps", kind="preference", embedding=emb)
+    other = store.store("GDAL private build lives in /opt", kind="fact")
+    new = store.store("unrelated pasta recipe", kind="fact")
+    with store.conn:  # supersede 标记的落库属后续任务，此处直写 SQL 验证过滤语义
+        store.conn.execute(
+            "UPDATE memories SET superseded_by=? WHERE uid=?", (new, old)
+        )
+
+    assert old not in {u for u, _ in store.fts_search("pip", limit=10)}
+    vec_uids, _ = store.all_vectors()
+    assert old not in vec_uids
+    assert [r["uid"] for r in store.get_many([old, other])] == [other]
+
+    total, rows = store.list_page()
+    assert total == 3
+    assert old in {r["uid"] for r in rows}
+
+
+def test_migrate_idempotent(tmp_path):
+    """旧库（缺新列）跑两遍迁移：schema 收敛到同一形态，不报错不重复加列。"""
+    import sqlite3
+
+    db = tmp_path / "old.db"
+    raw = sqlite3.connect(db)
+    raw.executescript("""
+        CREATE TABLE memories (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uid TEXT NOT NULL UNIQUE,
+            content TEXT NOT NULL,
+            kind TEXT NOT NULL DEFAULT 'fact',
+            source TEXT NOT NULL DEFAULT 'manual',
+            project TEXT,
+            tags TEXT NOT NULL DEFAULT '[]',
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            deleted INTEGER NOT NULL DEFAULT 0,
+            content_hash TEXT
+        );
+        INSERT INTO memories(uid, content, created_at, updated_at)
+        VALUES ('legacy1', 'old memory', 1.0, 1.0);
+    """)
+    raw.commit()
+    raw.close()
+
+    def snapshot():
+        c = sqlite3.connect(db)
+        cols = {r[1] for r in c.execute("PRAGMA table_info(memories)")}
+        has_queue = c.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='distill_queue'"
+        ).fetchone()
+        c.close()
+        return cols, has_queue
+
+    s1 = MemoryStore(db)  # 第一遍迁移
+    s1.close()
+    after_first = snapshot()
+
+    s2 = MemoryStore(db)  # 第二遍：__init__ 再跑一次 _migrate，另显式补跑一遍
+    s2._migrate()
+    after_second = snapshot()
+    s2.close()
+
+    assert after_first == after_second
+    expected = {"content_hash", "session_id", "last_recalled_at", "superseded_by", "superseded_at"}
+    assert expected <= after_second[0]
+    assert after_second[1]  # distill_queue 已建
