@@ -394,3 +394,15 @@ def test_distill_queue_len_in_stats(client):
     assert r.json()["queued"] is True
     after = client.get("/api/stats").json()["distill_queue_len"]
     assert after == before + 1
+
+
+# ---------- 零依赖基座：install_hint 门控 ----------
+
+def test_install_hint_gating(client, monkeypatch):
+    """无 numpy 时 /health 与 /api/stats 出现 install_hint；有 numpy 时绝不出现。"""
+    monkeypatch.setattr(server, "HAS_NUMPY", False)
+    assert "install_hint" in client.get("/health").json()
+    assert "install_hint" in client.get("/api/stats").json()
+    monkeypatch.setattr(server, "HAS_NUMPY", True)
+    assert "install_hint" not in client.get("/health").json()
+    assert "install_hint" not in client.get("/api/stats").json()

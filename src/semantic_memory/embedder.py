@@ -23,8 +23,7 @@ import sys
 from pathlib import Path
 from typing import Final
 
-import numpy as np
-import numpy.typing as npt
+from ._compat import INSTALL_HINT, HAS_NUMPY, np, npt
 
 log = logging.getLogger("semantic_memory.embedder")
 
@@ -107,7 +106,9 @@ class Embedder:
         self._gguf_path = Path(model_path) if model_path else None
         self._model = None
         self.available = False
-        if self._gguf_path is None:
+        if not HAS_NUMPY:
+            log.warning("numpy 未安装，向量通道关闭（纯 BM25 模式）：%s", INSTALL_HINT)
+        elif self._gguf_path is None:
             log.info("MEMORY_MODEL_PATH 未设置，向量通道关闭（纯 BM25 模式）")
         elif not self._gguf_path.exists():
             log.warning("模型文件不存在: %s，向量通道关闭", self._gguf_path)

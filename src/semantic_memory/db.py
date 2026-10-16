@@ -9,7 +9,7 @@ import time
 import uuid
 from pathlib import Path
 
-import numpy as np
+from ._compat import np
 
 
 def content_hash(text: str) -> str:
@@ -471,7 +471,8 @@ class MemoryStore:
             params = (project,)
         rows = self.conn.execute(sql, params).fetchall()
         if not rows:
-            return [], np.empty((0, 0), dtype=np.float32)
+            # 无 numpy 基座：空结果无消费者（向量腿整体关闭）
+            return [], np.empty((0, 0), dtype=np.float32) if np is not None else None
         uids = [r["uid"] for r in rows]
         mat = np.frombuffer(b"".join(r["embedding"] for r in rows), dtype=np.float32)
         dim = len(rows[0]["embedding"]) // 4

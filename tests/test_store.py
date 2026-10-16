@@ -1,6 +1,7 @@
 """BM25 降级路径（无嵌入模型）的核心链路测试。"""
-import numpy as np
 import pytest
+
+np = pytest.importorskip("numpy")  # 零依赖基座：无 numpy 时整模块跳过
 
 from semantic_memory.db import MemoryStore
 from semantic_memory.embedder import Embedder
@@ -176,3 +177,14 @@ def test_migrate_idempotent(tmp_path):
     expected = {"content_hash", "session_id", "last_recalled_at", "superseded_by", "superseded_at"}
     assert expected <= after_second[0]
     assert after_second[1]  # distill_queue 已建
+
+
+def test_embedder_guard_without_numpy(monkeypatch, tmp_path):
+    """HAS_NUMPY=False：模型路径无关地 available=False，embed 路径返回 None（纯 BM25 降级）。"""
+    from semantic_memory import embedder as embedder_mod
+
+    monkeypatch.setattr(embedder_mod, "HAS_NUMPY", False)
+    e = embedder_mod.Embedder(tmp_path / "whatever.gguf")
+    assert e.available is False
+    assert e.embed_batch(["x"]) is None
+    assert e.embed_query("x") is None

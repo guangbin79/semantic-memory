@@ -6,8 +6,9 @@ CPU 模式即可运行（0.6B Q8，首轮加载约 10-20s）。覆盖：
 import os
 from pathlib import Path
 
-import numpy as np
 import pytest
+
+np = pytest.importorskip("numpy")  # 零依赖基座：无 numpy 时整模块跳过
 
 MODEL = os.environ.get("MEMORY_MODEL_PATH", "")
 pytestmark = pytest.mark.skipif(

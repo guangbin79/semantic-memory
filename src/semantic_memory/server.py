@@ -31,6 +31,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from .web import INDEX_HTML
 
+from ._compat import HAS_NUMPY, INSTALL_HINT
 from .cloud import Consolidator
 from .config import Config
 from .db import MemoryStore
@@ -159,7 +160,10 @@ def _recall_hits(query: str, limit: int, project: str | None, global_limit: int)
 
 def rest_health() -> dict:
     s = store.stats()
-    return {"status": "ok", "embedder": embedder.available, "device": embedder.device, **s}
+    out = {"status": "ok", "embedder": embedder.available, "device": embedder.device, **s}
+    if not HAS_NUMPY:
+        out["install_hint"] = INSTALL_HINT  # 无 numpy 时出现，有 numpy 时绝不出现
+    return out
 
 
 # ---------------- 人用读/管接口 + 内置浏览页 ----------------
@@ -174,9 +178,12 @@ def api_stats() -> dict:
         top.append({"uid": t["uid"], "times": t["times"],
                     "content": rows[0]["content"][:120] if rows else None,
                     "kind": rows[0]["kind"] if rows else None})
-    return {**store.stats(), "embedder": embedder.available,
-            "device": embedder.device,
-            "injections": {**inj, "top": top}, **_obs_stats()}
+    out = {**store.stats(), "embedder": embedder.available,
+           "device": embedder.device,
+           "injections": {**inj, "top": top}, **_obs_stats()}
+    if not HAS_NUMPY:
+        out["install_hint"] = INSTALL_HINT
+    return out
 
 
 def api_injections(q: dict) -> dict:
@@ -749,6 +756,8 @@ def main() -> None:
     log.info("project key backfill: %s", backfill_project_keys(store))
 
     log.info("db=%s embedder=%s prefer=%s", cfg.db_path, embedder.available, cfg.device)
+    if not HAS_NUMPY:
+        log.info("numpy 未安装——向量通道关闭（纯 BM25）。%s", INSTALL_HINT)
     if cfg.token is None and cfg.host != "127.0.0.1":
         log.warning("MEMORY_TOKEN 未设置且绑定非回环地址 %s，REST 侧车无鉴权！", cfg.host)
     # MEMORY_PORT=0 → OS 分配临时端口，绑定后通过发现文件/stdout 发布真实地址

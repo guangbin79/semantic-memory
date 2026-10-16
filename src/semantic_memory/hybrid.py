@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import math
 
-import numpy as np
+from ._compat import np
 
 from .db import MemoryStore
 from .embedder import Embedder

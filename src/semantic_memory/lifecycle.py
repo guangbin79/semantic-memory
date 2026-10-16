@@ -14,7 +14,7 @@ import time
 import uuid
 from typing import Final
 
-import numpy as np
+from ._compat import np
 
 from .db import INSERT_MEMORY_SQL, MemoryStore, content_hash
 from .distiller import Distiller

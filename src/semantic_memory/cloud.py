@@ -18,9 +18,12 @@ from typing import Final
 
 try:
     import httpx2  # 历史传递依赖（API 与 httpx 同构）
-except ImportError:  # 环境仅携带 httpx 时回落
-    import httpx as httpx2
-import numpy as np
+except ImportError:  # 环境仅携带 httpx 时回落；零依赖基座两者皆无 → 云通道禁用
+    try:
+        import httpx as httpx2
+    except ImportError:
+        httpx2 = None  # type: ignore[assignment]
+from ._compat import np
 
 log = logging.getLogger("semantic_memory.cloud")
 
@@ -68,7 +71,10 @@ class Consolidator:
         self._base = base_url.strip().rstrip("/")
         self._key = api_key
         self._model = model.strip()
-        self._enabled = enabled
+        # 无 HTTP 客户端（零依赖基座）：仅在真的配置了云通道时才禁用并告警；未配置时本来就不启用
+        self._enabled = enabled and (httpx2 is not None or not base_url.strip())
+        if enabled and httpx2 is None and base_url.strip():
+            log.warning("MEMORY_CLOUD_* 已配置但 httpx/httpx2 均未安装——云整合通道禁用")
         self._max_calls = daily_max_calls
         self._max_tokens = daily_max_tokens
         self._batch_n = batch_n

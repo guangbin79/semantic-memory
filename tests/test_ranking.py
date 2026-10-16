@@ -1,12 +1,7 @@
 """排序后处理：遥测反哺、向量门限、冗余上限、重排与 scope 过滤。"""
-import numpy as np
 import pytest
 
-from semantic_memory.db import MemoryStore
-from semantic_memory.embedder import Embedder
-from semantic_memory.hybrid import hybrid_recall
-import numpy as np
-import pytest
+np = pytest.importorskip("numpy")  # 零依赖基座：无 numpy 时整模块跳过
 
 from semantic_memory.db import MemoryStore
 from semantic_memory.embedder import Embedder

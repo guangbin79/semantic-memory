@@ -3,9 +3,10 @@ import json
 import logging
 import time
 
-import httpx2
-import numpy as np
 import pytest
+
+httpx2 = pytest.importorskip("httpx2")  # 云通道测试需 HTTP 客户端
+np = pytest.importorskip("numpy")  # 零依赖基座：无 numpy 时整模块跳过
 
 from semantic_memory.cloud import INJECTION_RE, Consolidator
 from semantic_memory.config import Config

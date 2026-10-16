@@ -1,8 +1,9 @@
 """生命周期维护测试：去重、purge、TTL、使用度留存、backfill、既有库迁移。"""
 import time
 
-import numpy as np
 import pytest
+
+np = pytest.importorskip("numpy")  # 零依赖基座：无 numpy 时整模块跳过
 
 from semantic_memory.db import MemoryStore
 from semantic_memory.embedder import Embedder

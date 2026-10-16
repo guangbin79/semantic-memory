@@ -9,16 +9,15 @@ description = "Context-relevance sidecar for coding agents: model-semantic-level
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-dependencies = [
-    "fastmcp>=2.3",
-    "numpy>=1.26",
-]
+# 零依赖基座：裸 python3 可跑（BM25-only + install_hint 自解释）；向量腿见 extras
+dependencies = []
 
 [project.optional-dependencies]
-# 向量嵌入：Qwen3-Embedding-0.6B GGUF，缺省时自动降级为纯 BM25。
+# 向量腿：Qwen3-Embedding-0.6B GGUF，缺 numpy 时自动降级为纯 BM25（_compat 守门）。
 # 版本与 ctx-semantic 锁定的 llama-cpp-python 0.3.35 对齐（同一模型同一向量）。
-embed = ["llama-cpp-python==0.3.35"]
-dev = ["pytest>=8"]
+vector = ["numpy>=1.26"]
+embed = ["numpy>=1.26", "llama-cpp-python==0.3.35"]
+dev = ["pytest>=8", "numpy>=1.26"]  # dev 必含 numpy：全套件默认全跑
 
 [project.scripts]
 semantic-memory = "semantic_memory.server:main"
