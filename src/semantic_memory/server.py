@@ -802,7 +802,7 @@ def _cmd_golden(argv: list[str]) -> int:
         if key in seen:
             continue
         seen.add(key)
-        out_rows.append({"query": q[:200], "expect_uids": uids,
+        out_rows.append({"query": q[:2000], "expect_uids": uids,
                          "project": inj.get("project") or None})
         if len(out_rows) >= ns.limit:
             break
@@ -857,7 +857,6 @@ def main() -> None:
         raise SystemExit(_cmd_eval(args[1:]))
     if cmd == "golden":
         raise SystemExit(_cmd_golden(args[1:]))
-        raise SystemExit(_cmd_eval(args[1:]))
     if cmd == "consolidate":
         _cmd_consolidate()
         return

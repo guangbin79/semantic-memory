@@ -19,7 +19,6 @@ import logging
 import os
 import shutil
 import subprocess
-import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -110,7 +109,6 @@ class Embedder:
         # 首嵌并发门：ThreadingHTTPServer 多请求线程 + flush daemon 同时首嵌时，
         # 避免双载 600MB 模型（Reranker/Distiller 经 ModelSlot 有锁，本类独居无槽）。
         self._load_lock = threading.Lock()
-        self._model = None
         self.available = False
         if not HAS_NUMPY:
             log.warning("numpy 未安装，向量通道关闭（纯 BM25 模式）：%s", INSTALL_HINT)

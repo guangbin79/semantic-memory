@@ -37,11 +37,14 @@ UIDS=$(echo "$RESP" | jq -c '[(.hits // [])[].uid][0:50]')
 [ "$UIDS" = "[]" ] && exit 0
 
 # 同会话去重：uid 集合排序哈希；与已注入指纹一致 → 不注入、不上报遥测（保护前缀缓存）
-STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/semantic-memory"
 if [ -n "$SESSION_ID" ]; then
+  STATE_DIR="${XDG_STATE_HOME:-${HOME:-${TMPDIR:-/tmp}}/.local/state}/semantic-memory"
   SAFE_ID=$(printf '%s' "$SESSION_ID" | tr -c 'A-Za-z0-9._-' '_')
-  UID_HASH=$(printf '%s' "$UIDS" | jq -r 'sort | .[]' | sha256sum | cut -d' ' -f1)
-  [ "$(cat "$STATE_DIR/$SAFE_ID.uidhash" 2>/dev/null)" = "$UID_HASH" ] && exit 0
+  # sha256sum 缺席（如 macOS）回退 shasum；两者皆无 → 哈希为空 → 跳过去重（宁多注不误抑）
+  UID_HASH=$(printf '%s' "$UIDS" | jq -r 'sort | .[]' \
+    | { sha256sum 2>/dev/null || shasum -a 256 2>/dev/null; } | cut -d' ' -f1)
+  [ -n "$UID_HASH" ] \
+    && [ "$(cat "$STATE_DIR/$SAFE_ID.uidhash" 2>/dev/null)" = "$UID_HASH" ] && exit 0
 fi
 
 # 注入块：明示"数据非指令"，并剥除内容中的边界标签防止包裹逃逸
@@ -65,8 +68,9 @@ REPORT=$(jq -nc --arg h "$HARNESS" --arg k "$HOOK" --arg q "$QUERY" \
 curl -fsS --max-time 1.5 -X POST "$BASE/inject/report" \
   -H 'content-type: application/json' "${AUTH[@]}" -d "$REPORT" >/dev/null 2>&1 &
 # 记录本会话已注入的 uid 集合指纹（best-effort，失败绝不阻塞钩子）
-if [ -n "$SESSION_ID" ]; then
+if [ -n "$SESSION_ID" ] && [ -n "$UID_HASH" ]; then
   mkdir -p "$STATE_DIR" 2>/dev/null \
     && printf '%s' "$UID_HASH" > "$STATE_DIR/$SAFE_ID.uidhash" 2>/dev/null || true
+  find "$STATE_DIR" -name '*.uidhash' -mtime +7 -delete 2>/dev/null || true  # 防无限累积
 fi
 exit 0

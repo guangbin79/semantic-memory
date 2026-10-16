@@ -15,7 +15,7 @@ TRANSCRIPT=$(echo "$INPUT" | jq -r "$TRANSCRIPT_JQ")
 # transcript 为 JSONL；取最近一条用户文本消息（best-effort，结构以 harness 版本为准）
 TEXT=$(tail -50 "$TRANSCRIPT" \
   | jq -r 'select(.message.role=="user") | .message.content[]? | select(.type=="text") | .text' \
-  2>/dev/null | tail -1 | head -c 1200)
+  2>/dev/null | tail -1 | jq -rRs '.[0:1200]')  # 按字符截断，防撕裂 UTF-8（jq 遇非法字节报错）
 
 [ ${#TEXT} -lt 40 ] && exit 0
 bash "$DIR/ingest.sh" "$TEXT" "fact" "compaction"

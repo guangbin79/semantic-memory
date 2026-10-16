@@ -149,6 +149,8 @@ class _SerializedConn:
             return _SerializedCursor(self._conn.execute(*args, **kwargs))
 
     def executemany(self, sql, params) -> None:
+        # 约束：调用方必须在 `with self.conn:` 事务内使用——裸用不 commit 也不递增
+        # write_gen，向量缓存将看不到该写（现仓库唯一调用点 _migrate 在事务内）。
         with self._lock:
             cur = self._conn.executemany(sql, params)
             cur.close()
@@ -505,6 +507,11 @@ class MemoryStore:
         失效双轨：本连接写代数 write_gen + PRAGMA data_version（任何其它连接
         提交都会推进，如 distill flush 的独立连接）。两代数都没变 → 直接返回
         上次矩阵，免掉 fetchall+物化（实测 N=5k 约 58ms/次的主导成本）。
+        代数在查询前采样（时序正确性）：若查询期间发生写，存下的是旧代数，
+        下一次调用必然失效重查——宁可多查一次，绝不把旧数据配新代数驻缓存。
+        已知窗口（设计取舍）：同连接事务内先写后读本缓存可能读到事务前快照
+        （write_gen 在 __exit__ 才递增）——现无此调用序，新增调用方勿在
+        `with conn:` 写事务中途调 all_vectors。
         scope='global' 只取 project IS NULL，'project' 排除 NULL；
         这两档下 project 参数被忽略。
         """
@@ -513,8 +520,9 @@ class MemoryStore:
             dv = self.conn.execute("PRAGMA data_version").fetchone()[0]
         except sqlite3.Error:
             dv = None
+        gen = self.conn.write_gen
         hit = self._vec_cache.get(key)
-        if hit is not None and hit[2] == dv and hit[3] == self.conn.write_gen:
+        if hit is not None and hit[2] == dv and hit[3] == gen:
             return hit[0], hit[1]
 
         sql = (
@@ -529,17 +537,17 @@ class MemoryStore:
         rows = self.conn.execute(sql, params).fetchall()
         if np is None:
             # 无 numpy 基座：不物化矩阵（缓存该降级结果亦无害）
-            self._vec_cache[key] = ([], None, dv, self.conn.write_gen)
+            self._vec_cache[key] = ([], None, dv, gen)
             return [], None
         if not rows:
             mat = np.empty((0, 0), dtype=np.float32)
-            self._vec_cache[key] = ([], mat, dv, self.conn.write_gen)
+            self._vec_cache[key] = ([], mat, dv, gen)
             return [], mat
         uids = [r["uid"] for r in rows]
         mat = np.frombuffer(b"".join(r["embedding"] for r in rows), dtype=np.float32)
         dim = len(rows[0]["embedding"]) // 4
         mat = mat.reshape(len(rows), dim)
-        self._vec_cache[key] = (uids, mat, dv, self.conn.write_gen)
+        self._vec_cache[key] = (uids, mat, dv, gen)
         return uids, mat
 
     def get_many(self, uids: list[str]) -> list[sqlite3.Row]:

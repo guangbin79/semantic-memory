@@ -17,7 +17,7 @@ SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 export MEMORY_PROJECT="${MEMORY_PROJECT:-$PWD}"
 
 # 1. 显式记忆：记住… / remember …（best-effort 模式匹配）
-MEM=$(echo "$PROMPT" | grep -oE '(请记住|记住|remember)[:：]?[^。]{10,500}' | head -1 || true)
+MEM=$(printf '%s\n' "$PROMPT" | grep -oE '(请记住|记住|remember)[:：]?[^。]{10,500}' | head -1 || true)
 if [ -n "$MEM" ]; then
   CLEAN=$(echo "$MEM" | sed -E 's/^(请记住|记住|remember)[:：]?[[:space:]]*//')
   bash "$DIR/ingest.sh" "$CLEAN" "preference" "remember" &

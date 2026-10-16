@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ingest.sh "content" [kind] [source] [project]
 # 向 semantic-memory REST API 写入一条记忆。fail-open：失败静默退出 0。
-# project 缺省时取 MEMORY_PROJECT（第 4 参优先）。
+# project：第 4 参未传或为空串时回退 MEMORY_PROJECT。
 set -u
 
 BASE="${MEMORY_PLUGIN_URL:-http://127.0.0.1:8765}"
