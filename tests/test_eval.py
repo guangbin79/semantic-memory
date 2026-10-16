@@ -144,14 +144,13 @@ def test_judge_without_env_skips(eval_env, tmp_path, capsys, monkeypatch):
 
 
 def test_judge_without_wiring_exits_zero(eval_env, tmp_path, capsys, monkeypatch):
-    """env 已配且 Distiller 已实装但评注接线未实现：明示未实装、退出码保持 0。"""
-    monkeypatch.setenv("MEMORY_DISTILL_MODEL", "/tmp/whatever.gguf")
+    """无 Reranker 时 judge 明示跳过、退出码保持 0（fail-open）。"""
     _s, (_u1, _u2, u3, *_fill), tmp = eval_env
     golden = tmp / "g.jsonl"
     golden.write_text(json.dumps({"query": "nomatch xyz", "expect_uids": [u3]}) + "\n",
                       encoding="utf-8")
     assert server._cmd_eval(["--golden", str(golden), "--judge"]) == 0
-    assert "评注接线未实装" in capsys.readouterr().out
+    assert "重排模型不可用" in capsys.readouterr().out
 
 
 def test_reranker_distiller_share_one_modelslot():

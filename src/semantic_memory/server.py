@@ -112,24 +112,56 @@ def _record_recall(ms: float) -> None:
         _alert_last[lv] = now
         log.log(_LEVELS[lv], "recall alert: %s", msg)
 
-try:  # 旧目录自动迁移（D3）：仅模块导入时一次，禁入热路径；拒迁不阻塞启动
-    migrate_legacy()
-except MigrationRefused as e:
-    log.error("legacy migration skipped: %s", e)
-except MigrationError as e:
-    log.critical("旧目录数据无法自动迁移（%s）——拒绝以空库启动", e)
-    raise SystemExit(2) from e
-cfg = Config.from_env()
-store = MemoryStore(cfg.db_path)
-embedder = Embedder(cfg.model_path, dim=cfg.embed_dim, device=cfg.device)
-_slot = ModelSlot()  # 单槽分时：rerank 与 distill 互斥换载（embedder 常驻槽外）
-reranker = Reranker(cfg.rerank_model, device=cfg.device, budget_ms=cfg.rerank_budget_ms, slot=_slot)
-distiller = Distiller(cfg.distill_model, cfg.device, slot=_slot)  # 惰性加载：首次 distill 才经槽加载模型
-consolidator = Consolidator(
-    cfg.cloud_base_url, cfg.cloud_api_key, cfg.cloud_model,
-    enabled=cfg.cloud_enabled, daily_max_calls=cfg.cloud_daily_max_calls,
-    daily_max_tokens=cfg.cloud_daily_max_tokens, batch_n=cfg.cloud_batch_n,
-)
+# ---------------- 惰性核心单例（v0.3：import 零副作用） ----------------
+# import 本模块不触发迁移/开库/建模型（--help、setup、测试收集零成本）；
+# 首次属性访问（server.cfg/store/...）或 main() 才物化，物化后写入模块 globals。
+_CORE_SINGLETONS = ("cfg", "store", "embedder", "_slot", "reranker", "distiller", "consolidator")
+_core_lock = threading.Lock()
+_core_built = False
+
+
+def _build_core() -> dict:
+    try:  # 旧目录自动迁移（D3）：仅一次，禁入热路径；拒迁不阻塞启动
+        migrate_legacy()
+    except MigrationRefused as e:
+        log.error("legacy migration skipped: %s", e)
+    except MigrationError as e:
+        log.critical("旧目录数据无法自动迁移（%s）——拒绝以空库启动", e)
+        raise SystemExit(2) from e
+    cfg = Config.from_env()
+    store = MemoryStore(cfg.db_path)
+    embedder = Embedder(cfg.model_path, dim=cfg.embed_dim, device=cfg.device)
+    _slot = ModelSlot()  # 单槽分时：rerank 与 distill 互斥换载（embedder 常驻槽外）
+    return {
+        "cfg": cfg, "store": store, "embedder": embedder, "_slot": _slot,
+        "reranker": Reranker(cfg.rerank_model, device=cfg.device,
+                              budget_ms=cfg.rerank_budget_ms, slot=_slot),
+        "distiller": Distiller(cfg.distill_model, cfg.device, slot=_slot),
+        "consolidator": Consolidator(
+            cfg.cloud_base_url, cfg.cloud_api_key, cfg.cloud_model,
+            enabled=cfg.cloud_enabled, daily_max_calls=cfg.cloud_daily_max_calls,
+            daily_max_tokens=cfg.cloud_daily_max_tokens, batch_n=cfg.cloud_batch_n),
+    }
+
+
+def init_core() -> None:
+    """物化全部核心单例（幂等、线程安全）；main() 与首次属性访问都会触发。"""
+    global _core_built
+    if _core_built:
+        return
+    with _core_lock:
+        if _core_built:
+            return
+        globals().update(_build_core())
+        _core_built = True
+
+
+def __getattr__(name: str):
+    """PEP 562：外部属性访问触发物化；模块内函数走 globals（init 后同名同源）。"""
+    if name in _CORE_SINGLETONS:
+        init_core()
+        return globals()[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 # ---------------- 检索核心（REST 端点共用） ----------------
@@ -142,18 +174,20 @@ def _recall_hits(query: str, limit: int, project: str | None, global_limit: int)
     global_limit=0 或未指定 project 时单路调用，与既有行为逐字节一致。
     """
     if global_limit > 0 and project:
+        q = embedder.embed_query(query)  # 双路共用同一次查询嵌入（免重复推理）
         proj_hits = hybrid_recall(
             store, embedder, query=query, limit=limit, project=project,
             rrf_k=cfg.rrf_k, inject_boost=cfg.inject_boost,
             min_cosine=cfg.recall_min_cosine, max_cosine=cfg.recall_max_cosine,
             reranker=reranker, rerank_candidates=cfg.rerank_candidates,
+            query_vec=q,
         )
         glob_hits = hybrid_recall(
             store, embedder, query=query, limit=global_limit, project=None,
             rrf_k=cfg.rrf_k, inject_boost=cfg.inject_boost,
             min_cosine=cfg.recall_min_cosine, max_cosine=cfg.recall_max_cosine,
             reranker=reranker, rerank_candidates=cfg.rerank_candidates,
-            scope="global",
+            scope="global", query_vec=q,
         )
         seen = {h["uid"] for h in proj_hits}
         return (proj_hits + [h for h in glob_hits if h["uid"] not in seen])[:limit]
@@ -642,23 +676,35 @@ def run_eval(store: MemoryStore, embedder: Embedder, rows: list[dict], ks: list[
     }
 
 
-def _judge_misses(missed: list[dict]) -> None:
-    """--judge 通道：对未命中样本做相关性抽样评注（Wave 3 Distiller 接线点）。
+def _judge_misses(missed: list[dict], golden_rows: list[dict]) -> None:
+    """--judge 通道（v0.3 接线）：对未命中行裁决「检索漏召回 vs golden 标签可疑」。
 
-    环境未配或模块未实装都只打印跳过提示——不报错，退出码保持 0。
+    未命中 = 期望 uid 未进召回面。取期望条目内容交 Reranker 打 query/doc 相关分：
+    top 分 ≥0.5 → 标签可信，是检索真 miss；<0.5 → golden 标签本身可疑（伪 miss）。
+    Reranker 不可用/超预算 → 打印跳过，退出码不变（fail-open）。
     """
     if not missed:
         return
-    if not os.environ.get("MEMORY_DISTILL_MODEL"):
-        print(f"[eval] judge: MEMORY_DISTILL_MODEL 未配置，跳过 {len(missed)} 条未命中样本评注")
+    if reranker is None or not reranker.available:
+        print(f"[eval] judge: 重排模型不可用（MEMORY_RERANK_MODEL），跳过 {len(missed)} 条未命中评注")
         return
-    try:
-        from .distiller import Distiller
-    except ImportError:
-        print(f"[eval] judge: Distiller 未实装，跳过 {len(missed)} 条未命中样本评注")
-        return
-    # 评注接线未实装：Distiller 模块已交付，逐条评注实现留待后续任务
-    print(f"[eval] judge: Distiller 已可用，评注接线未实装（{len(missed)} 条未命中）")
+    by_query = {r["query"]: r for r in golden_rows}
+    for row in missed:
+        g = by_query.get(row["query"])
+        if not g:
+            continue
+        cands = [(r["uid"], r["content"]) for r in store.get_many(list(g["expect_uids"]))]
+        if not cands:
+            print(f"[judge] {row['query'][:40]!r}: 期望条目均已不在库（遗忘/被取代）——无法裁决")
+            continue
+        ranked = reranker.rerank(row["query"], cands)
+        if not ranked:
+            print(f"[judge] {row['query'][:40]!r}: 重排失败（超预算/异常）——无法裁决")
+            continue
+        top_uid, top_score = ranked[0]
+        verdict = ("检索漏召回（golden 标签可信）" if top_score >= 0.5
+                   else "golden 标签可疑（内容与查询相关性低）")
+        print(f"[judge] {row['query'][:40]!r}: top相关分={top_score:.2f} → {verdict}（uid={top_uid}）")
 
 
 def _cmd_eval(argv: list[str]) -> int:
@@ -673,8 +719,10 @@ def _cmd_eval(argv: list[str]) -> int:
     ap.add_argument("--golden", required=True,
                     help="golden jsonl 路径，每行 {query, expect_uids[], project?}")
     ap.add_argument("--k", default="1,3,5", help="逗号分隔的 k 值列表（默认 1,3,5）")
+    ap.add_argument("--min-recall", dest="min_recall", default=None, metavar="K:FLOAT",
+                    help="门禁：如 5:0.85 表示 recall@5 < 0.85 时退出码 1（CI/回归门用）")
     ap.add_argument("--judge", action="store_true",
-                    help="对未命中样本做相关性抽样评注（需 Distiller，Wave 3）")
+                    help="对未命中行裁决检索 miss vs golden 标签可疑（需 Reranker）")
     ns = ap.parse_args(argv)
 
     golden = Path(ns.golden)
@@ -706,8 +754,64 @@ def _cmd_eval(argv: list[str]) -> int:
     print(f"n={report['n']}  {summary}  mrr={report['mrr']:.3f}")
     print(json.dumps(report, ensure_ascii=False))
 
+    if ns.min_recall:
+        try:
+            k_s, v_s = ns.min_recall.split(":", 1)
+            k_gate, v_gate = int(k_s), float(v_s)
+        except ValueError:
+            print(f"eval: --min-recall 须为 K:FLOAT 形式（如 5:0.85）: {ns.min_recall!r}", file=sys.stderr)
+            return 2
+        actual = report["recall_at_k"].get(str(k_gate))
+        if actual is None:
+            print(f"eval: --min-recall 的 k={k_gate} 不在 --k 列表 {ks}", file=sys.stderr)
+            return 2
+        if actual < v_gate:
+            print(f"eval: recall@{k_gate}={actual:.3f} < 门槛 {v_gate:.3f} —— 门禁未过", file=sys.stderr)
+            return 1
+
     if ns.judge:
-        _judge_misses([r for r in report["rows"] if r["mrr"] == 0.0])
+        _judge_misses([r for r in report["rows"] if r["mrr"] == 0.0], rows)
+    return 0
+
+
+def _cmd_golden(argv: list[str]) -> int:
+    """golden 子命令（评测飞轮）：注入遥测 → golden jsonl，供 eval 消费。
+
+    供给侧语义：expect_uids 取实际注入过的 uid——注入≠模型采纳，但作为
+    recall@k 期望集自洽（检索目标就是复现真实注入面）。按 (project, query)
+    去重、取最近注入；真实使用即标注数据。
+    """
+    ap = argparse.ArgumentParser(
+        prog="semantic-memory golden",
+        description="从注入遥测构建 golden jsonl（每行 {query, expect_uids[], project?}）")
+    ap.add_argument("--out", default="-", help="输出路径（默认 - = stdout）")
+    ap.add_argument("--limit", type=int, default=200, help="最多导出行数")
+    ns = ap.parse_args(argv)
+
+    seen: set = set()
+    out_rows: list[dict] = []
+    for inj in store.list_injections(limit=ns.limit * 4):
+        q = (inj["query"] or "").strip()
+        try:
+            uids = [u for u in json.loads(inj["uids"]) if isinstance(u, str)]
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not q or not uids:
+            continue
+        key = (inj.get("project") or "", q)
+        if key in seen:
+            continue
+        seen.add(key)
+        out_rows.append({"query": q[:200], "expect_uids": uids,
+                         "project": inj.get("project") or None})
+        if len(out_rows) >= ns.limit:
+            break
+    payload = "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in out_rows)
+    if ns.out == "-":
+        sys.stdout.write(payload)
+    else:
+        Path(ns.out).write_text(payload, encoding="utf-8")
+    print(f"golden: {len(out_rows)} 行 → {ns.out}", file=sys.stderr)
     return 0
 
 
@@ -721,7 +825,7 @@ def _cmd_consolidate() -> None:
 _USAGE = """usage: semantic-memory [-h] [command]
 
 语义记忆服务（单进程）。默认命令 serve：启动 HTTP 服务（REST 面）。
-管理子命令：setup / purge / backfill / eval / consolidate / distill（详见各 --help）。
+管理子命令：setup / purge / backfill / eval / golden / consolidate / distill（详见各 --help）。
 """
 
 
@@ -735,9 +839,10 @@ def main() -> None:
         return
 
     # ---- 管理子命令（维护面：LLM 够不到的地方）----
-    if cmd == "setup":  # 安装面（任务 8）：探测→校验下载→写 config→冒烟
+    if cmd == "setup":  # 安装面（任务 8）：探测→校验下载→写 config→冒烟；零核心单例成本
         from .setup import run_setup
         raise SystemExit(run_setup(args[1:]))
+    init_core()  # 其余子命令与 serve 都需要核心单例（惰性物化点）
     if cmd == "purge":
         report = run_maintenance(store, ttl_artifact_days=cfg.ttl_artifact_days,
                           ttl_injection_days=cfg.ttl_injection_days,
@@ -749,6 +854,9 @@ def main() -> None:
         print(json.dumps(backfill_vectors(store, embedder), ensure_ascii=False))
         return
     if cmd == "eval":
+        raise SystemExit(_cmd_eval(args[1:]))
+    if cmd == "golden":
+        raise SystemExit(_cmd_golden(args[1:]))
         raise SystemExit(_cmd_eval(args[1:]))
     if cmd == "consolidate":
         _cmd_consolidate()

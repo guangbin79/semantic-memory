@@ -115,7 +115,7 @@ def test_file_paths_and_discovery_off(monkeypatch, tmp_path):
 
 
 def test_server_startup_fails_naming_bad_config_file(tmp_path):
-    """语法错 → 启动失败（import server 即 from_env）且错误指明文件。"""
+    """语法错 → 物化即失败（属性访问触发 from_env）且错误指明文件。"""
     dd = tmp_path / "bad"
     dd.mkdir()
     (dd / "config.toml").write_text("not valid toml ][\n", encoding="utf-8")
@@ -127,7 +127,7 @@ def test_server_startup_fails_naming_bad_config_file(tmp_path):
         "MEMORY_DB_PATH": str(tmp_path / "i.db"),
         "MEMORY_DEVICE": "cpu",
     })
-    proc = subprocess.run([sys.executable, "-c", "import semantic_memory.server"],
+    proc = subprocess.run([sys.executable, "-c", "import semantic_memory.server as s; s.cfg"],
                           env=env, cwd=REPO, capture_output=True, text=True, timeout=60)
     assert proc.returncode != 0
     assert "config.toml" in proc.stderr and str(dd / "config.toml") in proc.stderr

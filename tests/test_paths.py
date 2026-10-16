@@ -241,7 +241,7 @@ def test_migrate_no_legacy_noop(monkeypatch, tmp_path):
 
 
 def test_server_startup_triggers_migration(tmp_path):
-    """server 模块导入即迁移（serve 与 python -m 同链）；子进程真实验证。"""
+    """核心单例物化即迁移（v0.3 起 import 零副作用，属性访问触发；serve 同链）。"""
     home = tmp_path / "home"
     home.mkdir()
     legacy = _make_legacy(home)
@@ -254,7 +254,7 @@ def test_server_startup_triggers_migration(tmp_path):
         "MEMORY_DB_PATH": str(tmp_path / "isolate.db"),  # 不占用默认 db 位
         "MEMORY_DEVICE": "cpu",
     })
-    proc = subprocess.run([sys.executable, "-c", "import semantic_memory.server"],
+    proc = subprocess.run([sys.executable, "-c", "import semantic_memory.server as s; s.store"],
                           env=env, cwd=REPO, capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0, proc.stderr
     new = home / "semantic-memory-mcp"
