@@ -17,8 +17,8 @@ import time
 from typing import Final
 
 try:
-    import httpx2  # fastmcp 4.x 传递依赖（API 与 httpx 同构）
-except ImportError:  # fastmcp>=2.3 允许解析到仅携带 httpx 的旧版
+    import httpx2  # 历史传递依赖（API 与 httpx 同构）
+except ImportError:  # 环境仅携带 httpx 时回落
     import httpx as httpx2
 import numpy as np
 

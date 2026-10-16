@@ -129,7 +129,7 @@ class _SerializedCursor:
 class _SerializedConn:
     """单连接的跨线程序列化门面。
 
-    ASGI 服务器（uvicorn / TestClient）会在工作线程里执行同步路由，
+    线程化 HTTP 服务器会在工作线程里执行路由，
     而 sqlite3 连接默认绑定创建线程（check_same_thread）。门面用 RLock
     保证：单条语句原子执行并急切物化结果；`with conn:` 事务块整体持锁，
     多语句事务不会与别的线程交织。

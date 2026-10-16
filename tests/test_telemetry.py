@@ -10,16 +10,13 @@ os.environ["MEMORY_DB_PATH"] = os.path.join(tempfile.mkdtemp(prefix="telemetry-"
 os.environ.pop("MEMORY_TOKEN", None)
 
 import pytest
-from starlette.testclient import TestClient
 
 from semantic_memory import server
 from semantic_memory.lifecycle import run_maintenance
 
 
-@pytest.fixture(scope="module")
-def client():
-    with TestClient(server.mcp.http_app()) as c:
-        yield c
+# client fixture（进程内 ThreadingHTTPServer + http.client）由 conftest 提供；
+# server 模块单例沿用首个导入模块（test_rest）的临时库。
 
 
 def test_report_and_list(client):
@@ -55,8 +52,8 @@ def test_stats_aggregation_and_top(client):
     top = {t["uid"]: t for t in s["top"]}
     assert top[u1]["times"] >= 2 and "热门条目甲" in top[u1]["content"]
     assert top[u1]["kind"] == "fact"
-    # MCP 工具面也能看到注入总量
-    assert server.memory_stats()["injections"] == s["total"]
+    # 存储层注入总量与 /api/stats 聚合一致（旧 MCP 工具面已删，契约并入存储/HTTP 双面）
+    assert server.store.injection_stats()["total"] == s["total"]
 
 
 def test_ttl_purge(client):
@@ -130,7 +127,7 @@ def test_api_stats_observability_fields(client):
 
 
 def test_memory_stats_observability_fields(client):
-    s = server.memory_stats()
+    s = client.get("/api/stats").json()
     for k in ("recall_p50_ms", "recall_p95_ms", "distill_queue_len",
               "cloud_calls_24h", "entries"):
         assert k in s, k

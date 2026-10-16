@@ -1,29 +1,27 @@
-"""REST 侧车与 API 路由测试：真实 HTTP 打 FastMCP ASGI app。
+"""REST 面与 API 路由测试：进程内 ThreadingHTTPServer(port 0) + http.client。
 
 覆盖：health / ingest / recall / api stats / api memories(过滤分页) /
-单条删除 / 批量维护双闸门（无 token 403、错票 401、对票 200）。
+单条删除 / 批量维护双闸门（无 token 403、错票 401、对票 200）/
+传输硬性属性（HTTP/1.1+Content-Length、411/415/400、500 JSON 兜底）/
+Host 与 Origin 白名单 / 旧 MCP 工具面语义迁移（去重、kind 校验、
+空查询、stats、forget——MCP 面已删，契约并入对应端点用例）。
 server 模块在导入时按环境建库，本模块导入前指向临时库。
 """
+import http.client
 import os
 import subprocess
 import tempfile
 import threading
 from types import SimpleNamespace
 
+import pytest
+
+from conftest import raw_request
+
 os.environ["MEMORY_DB_PATH"] = os.path.join(tempfile.mkdtemp(prefix="rest-"), "rest.db")
 os.environ.pop("MEMORY_TOKEN", None)
 
-import pytest
-from starlette.testclient import TestClient
-
 from semantic_memory import server
-
-
-@pytest.fixture(scope="module")
-def client():
-    app = server.mcp.http_app()
-    with TestClient(app) as c:
-        yield c
 
 
 def test_health(client):
@@ -45,6 +43,7 @@ def test_ingest_and_recall_roundtrip(client):
 
 
 def test_ingest_dedup_via_rest(client):
+    """旧 MCP memory_store 去重契约：重复内容刷新既有条目而非新增。"""
     body = {"content": "重复写入的 REST 条目", "kind": "fact", "source": "test"}
     u1 = client.post("/ingest", json=body).json()["uid"]
     r2 = client.post("/ingest", json=body).json()
@@ -68,7 +67,9 @@ def test_ingest_path_project_stored_normalized(client, monkeypatch):
 
 
 def test_api_stats_and_memories_filter(client):
-    assert client.get("/api/stats").json()["total"] >= 2
+    s = client.get("/api/stats").json()
+    assert s["total"] >= 2
+    assert s["by_kind"].get("fact", 0) >= 1  # 旧 MCP memory_stats 契约：按 kind 分布
     r = client.get("/api/memories", params={"project": "rest-proj", "limit": 10})
     assert all(m["project"] == "rest-proj" for m in r.json()["memories"])
     r = client.get("/api/memories", params={"kind": "decision"})
@@ -88,6 +89,7 @@ def test_api_memories_pagination(client):
 
 
 def test_api_forget_single(client):
+    """旧 MCP memory_forget/memory_list 契约：单条软删除 + 列表同步消失。"""
     uid = client.post("/ingest", json={"content": "将被删除的唯一条目 qx7delete",
                                        "kind": "fact", "source": "test"}).json()["uid"]
     assert client.delete(f"/api/memories/{uid}").json()["forgotten"] is True
@@ -111,15 +113,15 @@ def with_token():
 
 
 def test_bulk_guard_403_without_token(client):
-    r = client.post("/api/maintenance/purge")
+    r = client.post("/api/maintenance/purge", json={})
     assert r.status_code == 403 and "MEMORY_TOKEN" in r.json()["error"]
 
 
 def test_bulk_guard_401_and_200_with_token(client, with_token):
-    assert client.post("/api/maintenance/purge").status_code == 401
-    assert client.post("/api/maintenance/purge",
+    assert client.post("/api/maintenance/purge", json={}).status_code == 401
+    assert client.post("/api/maintenance/purge", json={},
                        headers={"authorization": "Bearer bad"}).status_code == 401
-    r = client.post("/api/maintenance/purge",
+    r = client.post("/api/maintenance/purge", json={},
                     headers={"authorization": "Bearer secret"})
     assert r.status_code == 200 and "total_removed" in r.json()
 
@@ -131,6 +133,98 @@ def test_read_routes_require_auth_when_token_set(client, with_token):
     # 写入信道同样受护
     assert client.post("/ingest", json={"content": "x"}).status_code == 401
     assert client.post("/idle").status_code == 401
+
+
+# ---------- 传输硬性属性（stdlib http.server 评审钉死项） ----------
+
+def test_http11_content_length_and_keepalive(client):
+    """HTTP/1.1 + 每响应带准确 Content-Length + 同连接可复用。"""
+    conn = http.client.HTTPConnection(client.host, client.port, timeout=10)
+    try:
+        for _ in range(2):
+            conn.request("GET", "/health")
+            r = conn.getresponse()
+            body = r.read()
+            assert r.status == 200 and r.version == 11
+            assert int(r.headers["Content-Length"]) == len(body)
+            assert r.headers["Content-Type"] == "application/json"
+    finally:
+        conn.close()
+
+
+def test_204_no_body_no_content_length(client):
+    r = client.post("/idle", json={})
+    assert r.status_code == 204
+    assert r._body == b""
+    assert "Content-Length" not in r.headers  # RFC 7230：204 禁带
+
+
+def test_unknown_path_404_including_mcp(client):
+    """MCP 面已删：/mcp 及任意未知路径一律 404 JSON。"""
+    assert client.get("/mcp").status_code == 404
+    assert client.post("/mcp", json={}).status_code == 404
+    assert client.get("/nope").status_code == 404
+
+
+def test_host_allowlist_403(client):
+    """DNS rebinding 防护：非回环 Host → 403（GET /health 亦不豁免）。"""
+    out = raw_request(client.port,
+                      b"GET /health HTTP/1.1\r\nHost: evil.example\r\n"
+                      b"Connection: close\r\n\r\n")
+    assert b" 403 " in out.split(b"\r\n", 1)[0] and b"host not allowed" in out
+
+
+def test_missing_content_length_411(client):
+    out = raw_request(client.port,
+                      b"POST /ingest HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+    assert b" 411 " in out.split(b"\r\n", 1)[0]
+
+
+def test_chunked_body_411(client):
+    out = raw_request(client.port,
+                      b"POST /ingest HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                      b"Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n")
+    assert b" 411 " in out.split(b"\r\n", 1)[0]
+
+
+def test_text_plain_rejected_415(client):
+    """no-cors 盲写封堵：非 application/json 的 POST 一律 415（未落库）。"""
+    before = server.store.stats()["total"]
+    r = client.post("/ingest", data=b'{"content": "smuggled"}',
+                    headers={"Content-Type": "text/plain"})
+    assert r.status_code == 415
+    assert server.store.stats()["total"] == before
+
+
+def test_bad_json_400(client):
+    r = client.post("/ingest", data=b"not-json{",
+                    headers={"Content-Type": "application/json"})
+    assert r.status_code == 400
+
+
+def test_dispatcher_500_json_fallback(client, monkeypatch):
+    def boom(body):
+        raise RuntimeError("boom")
+    monkeypatch.setattr(server, "rest_recall", boom)
+    r = client.post("/recall", json={"query": "x"})
+    assert r.status_code == 500 and r.json()["error"] == "internal server error"
+    assert r.headers["Content-Type"] == "application/json"
+
+
+# ---------- 写端点双重防 drive-by（Origin 白名单） ----------
+
+def test_origin_evil_403(client):
+    """浏览器跨源必带 Origin：非回环 Origin 的写请求 → 403（curl/插件不带→零摩擦）。"""
+    r = client.post("/ingest", json={"content": "drive-by"},
+                    headers={"Origin": "https://evil.com"})
+    assert r.status_code == 403
+
+
+def test_origin_loopback_allowed(client):
+    """同源（Web UI 自身）写请求零摩擦：回环 Origin 放行。"""
+    r = client.post("/ingest", json={"content": "同源写入验证 QXorg", "source": "test"},
+                    headers={"Origin": f"http://127.0.0.1:{client.port}"})
+    assert r.status_code == 200
 
 
 # ---------- task10：project+global 两路召回 ----------
@@ -168,6 +262,10 @@ def test_global_merge_order(client):
     r0 = client.post("/recall", json={
         "query": "两路召回", "limit": 4, "project": "two-path"})
     assert {p1, p2} <= {h["uid"] for h in r0.json()["hits"]}
+    # 旧 MCP 契约迁移：不传 project 时 global_limit>0 退化为全局检索（两路开关不改语义）
+    r_all = client.post("/recall", json={
+        "query": "两路召回", "limit": 4, "global_limit": 2})
+    assert {p1, p2, g1, g2} <= {h["uid"] for h in r_all.json()["hits"]}
 
 
 def test_global_fills_project_remainder(client):
@@ -203,8 +301,22 @@ def test_global_zero_byte_identical(client):
         "global_limit": 0}).json() == {"hits": old}
 
 
-# ---------- task5：蒸馏缓冲路由 + 批量阈值 + /idle ----------
+def test_recall_empty_query(client):
+    """旧 MCP 契约迁移：空查询返回空集（不炸、不凑数）。"""
+    assert client.post("/recall", json={"query": ""}).json()["hits"] == []
 
+
+def test_store_rejects_invalid_kind(client):
+    """旧 MCP 契约迁移：非法 kind 拒收——存储层 ValueError 仍在，端点面 500 兜底且不落库。"""
+    with pytest.raises(ValueError):
+        server.store.store(content="bad kind", kind="nonsense")
+    before = server.store.stats()["total"]
+    r = client.post("/ingest", json={"content": "bad kind entry", "kind": "nonsense", "source": "test"})
+    assert r.status_code == 500 and r.json()["error"] == "internal server error"
+    assert server.store.stats()["total"] == before
+
+
+# ---------- task5：蒸馏缓冲路由 + 批量阈值 + /idle ----------
 
 def _pending_count():
     return server.store.conn.execute(
@@ -260,14 +372,13 @@ def test_idle_returns_204_and_flushes_async(client, monkeypatch):
         return {"typed": 0, "stored_raw": 0}
 
     monkeypatch.setattr(server, "flush_distill_queue", fake_flush)
-    r = client.post("/idle")
+    r = client.post("/idle", json={})
     assert r.status_code == 204
     assert done.wait(timeout=5)
     assert len(calls) == 1
 
 
 # ---------- task14：观测面 ----------
-
 
 def test_recall_latency_recorded(client):
     r = client.post("/recall", json={"query": "观测面延迟验证"})
