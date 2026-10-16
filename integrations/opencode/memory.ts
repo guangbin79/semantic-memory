@@ -569,6 +569,7 @@ async function control(ctx: StableCtx, options?: Record<string, unknown>): Promi
        */
       if (typeof ctx.tool?.transform === "function") {
         await ctx.tool.transform((editor) => {
+          const KINDS = new Set(["preference", "decision", "fact"]); // 与服务端 VALID_KINDS 对齐
           editor.add({
             name: "memory_store",
             description:
@@ -585,10 +586,10 @@ async function control(ctx: StableCtx, options?: Record<string, unknown>): Promi
             execute: async (input: any) => ({
               content: await postTool("/ingest", {
                 content: input.text,
-                kind: input.kind,
+                kind: input.kind && KINDS.has(input.kind) ? input.kind : undefined, // 非法值回落服务端默认 fact
                 source: "remember", // 直存，不入蒸馏队列
                 project,
-                tags: input.tags,
+                tags: Array.isArray(input.tags) ? input.tags : undefined,
               }),
             }),
           });
@@ -599,12 +600,13 @@ async function control(ctx: StableCtx, options?: Record<string, unknown>): Promi
               type: "object",
               properties: {
                 query: { type: "string", description: "检索查询" },
+                project: { type: "string", description: "限定项目（缺省搜全局）" },
                 limit: { type: "number", description: "返回条数（缺省服务端 5）" },
               },
               required: ["query"],
             },
             execute: async (input: any) => ({
-              content: await postTool("/recall", { query: input.query, limit: input.limit }),
+              content: await postTool("/recall", { query: input.query, limit: input.limit, project: input.project }),
             }),
           });
         });

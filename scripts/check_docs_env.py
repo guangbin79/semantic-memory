@@ -32,7 +32,8 @@ for m in re.finditer(r'_bool\(\s*"MEMORY_([A-Z0-9_]+)",\s*"[a-z0-9_]+",\s*(True|
 
 code_defaults["MEMORY_DISCOVERY_FILE"] = "<db>.server.json"  # config.py 153-154：opt 后默认 db_path.with_name(name + ".server.json")
 
-# ---- ② paths.py：真加载模块推导动态默认（HOME 打桩 → 换回 ~ 前缀）---- os.environ.pop("MEMORY_DATA_DIR", None)
+# ---- ② paths.py：真加载模块推导动态默认（HOME 打桩 → 换回 ~ 前缀）----
+os.environ.pop("MEMORY_DATA_DIR", None)  # 胶注残留修复：pop 必须真实执行
 os.environ.pop("XDG_DATA_HOME", None)
 os.environ["HOME"] = "/home/checkdocs"
 _spec = importlib.util.spec_from_file_location("_sm_paths", ROOT / "src/semantic_memory/paths.py")
@@ -69,12 +70,12 @@ for name in ("README.md", "README.zh-CN.md"):
     text = (ROOT / name).read_text(encoding="utf-8")
     doc_rows: dict[str, str] = {}
     for line in text.splitlines():
-        m = re.match(r"^\|\s*`(MEMORY_[A-Z0-9_]+)`\s*\|\s*([^|]+)\|", line)
+        m = re.match(r"^\|\s*`(MEMORY_[A-Z0-9_]+)`.*?\|\s*([^|]+)\|", line)  # 兼容合并行（HOST/PORT 同格）
         if not m:
             continue
         var, default = m.group(1), norm(m.group(2))
         if var == "MEMORY_HOST":                      # 合并行 "`127.0.0.1` / `8765`"
-            port = default.split("/")[-1].strip()
+            port = default.split("/")[-1].strip().strip("`")  # 合并行端口段带反引号
             doc_rows["MEMORY_HOST"], doc_rows["MEMORY_PORT"] = "127.0.0.1", port
             continue
         if var == "MEMORY_DATA_DIR":                  # 单元格含解析序说明 → 只断言默认前缀

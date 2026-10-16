@@ -25,15 +25,6 @@ os.environ.setdefault("MEMORY_RERANK_MODEL", "")  # 未设→关闭保封闭性�
 _ISOLATION = tempfile.mkdtemp(prefix="mcp-test-isolation-")  # 会话级隔离根（tmp 自身会回收）
 os.environ["MEMORY_DATA_DIR"] = os.path.join(_ISOLATION, "data")   # 新数据目录（含 config.toml 落点）
 os.environ["XDG_DATA_HOME"] = os.path.join(_ISOLATION, "xdg")      # 旧默认目录同链隔离（迁移测试安全）
-import json
-import os
-import threading
-from urllib.parse import urlencode
-
-import pytest
-
-os.environ.setdefault("MEMORY_RERANK_MODEL", "")  # 未设→关闭保封闭性（防真模型意外加载）；显式指定→保留 opt-in
-
 
 class RestResult:
     """http.client 响应薄封装：对齐旧 TestClient 习惯（status_code/json/text/headers）。"""

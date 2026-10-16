@@ -48,7 +48,7 @@ from .lifecycle import (
 )
 from .project import backfill_project_keys, resolve_project
 from .modelslot import ModelSlot
-from .paths import MigrationRefused, migrate_legacy
+from .paths import MigrationError, MigrationRefused, migrate_legacy
 from .reranker import Reranker
 from .startup_gate import check_startup
 
@@ -116,6 +116,9 @@ try:  # 旧目录自动迁移（D3）：仅模块导入时一次，禁入热路�
     migrate_legacy()
 except MigrationRefused as e:
     log.error("legacy migration skipped: %s", e)
+except MigrationError as e:
+    log.critical("旧目录数据无法自动迁移（%s）——拒绝以空库启动", e)
+    raise SystemExit(2) from e
 cfg = Config.from_env()
 store = MemoryStore(cfg.db_path)
 embedder = Embedder(cfg.model_path, dim=cfg.embed_dim, device=cfg.device)
@@ -483,11 +486,11 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             return self._send_json({"error": "not found"}, 404)
 
         if method == "POST":
-            if not self._origin_ok():
-                return self._send_json({"error": "cross-origin write rejected"}, 403)
-            body = self._read_body()  # 先读后鉴权：任何错误响应后连接内不留未读字节
+            body = self._read_body()  # 最先读体：任何提前响应后连接内不留未读字节（keep-alive 防串扰）
             if body is None:
                 return
+            if not self._origin_ok():
+                return self._send_json({"error": "cross-origin write rejected"}, 403)
             if path == "/idle":
                 if not _authorized(self.headers):
                     return self._send_json({"error": "unauthorized"}, 401)

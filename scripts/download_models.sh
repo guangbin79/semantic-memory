@@ -10,7 +10,14 @@
 #   download_models.sh --audit  README env 表 vs 代码默认值逐一比对，不一致退出非零
 set -euo pipefail
 
-MODEL_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/memory-mcp/models"
+# 模型目录随数据目录三档解析（与 paths.py 同语义，B1 统一目录后默认 ~/semantic-memory-mcp）
+if [ -n "${MEMORY_DATA_DIR:-}" ]; then
+  MODEL_DIR="$MEMORY_DATA_DIR/models"
+elif [ -n "${XDG_DATA_HOME:-}" ]; then
+  MODEL_DIR="$XDG_DATA_HOME/memory-mcp/models"
+else
+  MODEL_DIR="$HOME/semantic-memory-mcp/models"
+fi
 mkdir -p "$MODEL_DIR"
 
 DISTILL_FILE="Qwen3-1.7B-Q8_0.gguf"
@@ -30,85 +37,8 @@ if [ "${1:-}" = "--check" ]; then
 fi
 
 if [ "${1:-}" = "--audit" ]; then
-  exec python3 - "$PWD" <<'PYEOF'
-"""校对 README.md / README.zh-CN.md env 表的每个 MEMORY_* 默认值 == 代码默认值。
-
-双树取值：服务变量读 src/semantic_memory/config.py，插件变量读 integrations/opencode/memory.ts；
-再反向断言代码里的每个 MEMORY_* env 都出现在文档表中（防文档漂移）。
-"""
-import re
-import sys
-from pathlib import Path
-
-root = Path(sys.argv[1])
-cfg_src = (root / "src/semantic_memory/config.py").read_text(encoding="utf-8")
-ts_src = (root / "integrations/opencode/memory.ts").read_text(encoding="utf-8")
-
-EMPTIES = {"", "empty", "空"}
-
-
-def doc_rows(name: str) -> dict[str, str]:
-    rows: dict[str, str] = {}
-    for line in (root / name).read_text(encoding="utf-8").splitlines():
-        if not line.startswith("| `MEMORY_"):
-            continue
-        cells = [c.strip() for c in line.strip().strip("|").split("|")]
-        var_list = re.findall(r"MEMORY_[A-Z_0-9]+", cells[0])
-        defaults = [d.strip().strip("`") for d in cells[1].split(" / ")]
-        if len(var_list) != len(defaults):
-            raise SystemExit(f"{name}: 表行默认列数与变量数不符: {line}")
-        rows.update(zip(var_list, defaults))
-    return rows
-
-
-def cfg_default(var: str) -> str | None:
-    """从 config.py 取 os.environ.get("VAR", "literal") 的字面默认；取不到回 SPECIAL。"""
-    special = {
-        "MEMORY_DB_PATH": "~/.local/share/memory-mcp/memory.db",   # _default_db()
-        "MEMORY_DISCOVERY_FILE": "<db>.server.json",               # 派生默认
-    }
-    if var in special:
-        return special[var]
-    m = re.search(r'os\.environ\.get\("' + var + r'"(?:,\s*"([^"]*)")?\)', cfg_src)
-    if m:
-        return m.group(1) if m.group(1) is not None else ""
-    return None
-
-
-def ts_default(var: str) -> str | None:
-    m = re.search(r"process\.env\." + var + r' \?\? "?([^"\s,)]*)"?\s*[,)\n]', ts_src)
-    if m:
-        return m.group(1)
-    if re.search(r'process\.env\.' + var + r' === "1"', ts_src):
-        return "0"   # 仅显式 =1 开 → 默认关
-    if re.search(r'process\.env\.' + var + r' !== "0"', ts_src):
-        return "1"   # 仅显式 =0 关 → 默认开
-    m = re.search(r'process\.env\.' + var + r' === "system" \? "system" : "(\w+)"', ts_src)
-    return m.group(1) if m else None
-
-
-fails: list[str] = []
-for name in ("README.md", "README.zh-CN.md"):
-    rows = doc_rows(name)
-    for var, doc in sorted(rows.items()):
-        code = ts_default(var) if var.startswith("MEMORY_PLUGIN_") else cfg_default(var)
-        if code is None:
-            fails.append(f"{name}: {var} 在代码中找不到（文档编造？）")
-        elif doc in EMPTIES and code == "":
-            continue
-        elif doc != code:
-            fails.append(f"{name}: {var} 文档默认 {doc!r} != 代码默认 {code!r}")
-    # 反向：代码里每个 env 都要出现在文档表（防代码新增/改名后文档漏更）
-    for var in set(re.findall(r'os\.environ\.get\("(MEMORY_[A-Z_0-9]+)"', cfg_src)) \
-            | set(re.findall(r"process\.env\.(MEMORY_PLUGIN_[A-Z_0-9]+)", ts_src)):
-        if var not in rows:
-            fails.append(f"{name}: {var} 代码存在但文档表缺失")
-
-if fails:
-    print("\n".join(f"FAIL {f}" for f in fails))
-    sys.exit(1)
-print("audit: 双语 README env 表与代码默认值一致")
-PYEOF
+  # 文档 env 表校验统一走权威校对器（旧内联抽取在 config 重构后失配，已废弃）
+  exec python3 "$(cd "$(dirname "$0")" && pwd)/check_docs_env.py"
 fi
 
 download() {

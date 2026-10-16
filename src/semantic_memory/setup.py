@@ -195,6 +195,15 @@ def run_setup(argv: list[str] | None = None, *, client=None, out=sys.stdout) -> 
     ns = ap.parse_args(argv)
 
     data_dir = Path(ns.data_dir).expanduser() if ns.data_dir else resolve_data_dir()
+    if not ns.data_dir:  # 默认目录：先把旧目录数据迁进来（防 setup 先灌目录导致迁移被幂等跳过）
+        try:
+            migrate_legacy()
+        except MigrationRefused as e:
+            print(f"setup: 旧目录迁移被拒（{e}）——请先停旧服务再重试", file=sys.stderr)
+            return 1
+        except MigrationError as e:
+            print(f"setup: 旧目录迁移失败（{e}）——旧数据原封未动，请手工迁移", file=sys.stderr)
+            return 1
     models_dir = data_dir / "models"
     device = ns.device
     if device == "auto":
@@ -250,6 +259,10 @@ def run_setup(argv: list[str] | None = None, *, client=None, out=sys.stdout) -> 
         values["distill_model"] = str(models_dir / MODELS["distill"].filename)
     if ns.profile == "bm25":
         values["allow_bm25_only"] = True
+    existing_cfg = data_dir / "config.toml"
+    if existing_cfg.is_file():  # 重跑 setup 不丢用户已有键（本次值覆盖旧值）
+        import tomllib
+        values = {**tomllib.loads(existing_cfg.read_text(encoding="utf-8")), **values}
     config_path = write_config(data_dir, values)
 
     # ---- ④ 冒烟（bm25 全跳过；真件）----

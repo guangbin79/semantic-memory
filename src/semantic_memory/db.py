@@ -470,9 +470,12 @@ class MemoryStore:
             sql += " AND m.project = ?"
             params = (project,)
         rows = self.conn.execute(sql, params).fetchall()
+        if np is None:
+            # 无 numpy 基座：不物化矩阵——库里有历史向量（旧向量版安装迁移而来）
+            # 也按“无向量”降级（cloud._scan 仅以云配置为门，非空行时 frombuffer 必崩）
+            return [], None
         if not rows:
-            # 无 numpy 基座：空结果无消费者（向量腿整体关闭）
-            return [], np.empty((0, 0), dtype=np.float32) if np is not None else None
+            return [], np.empty((0, 0), dtype=np.float32)
         uids = [r["uid"] for r in rows]
         mat = np.frombuffer(b"".join(r["embedding"] for r in rows), dtype=np.float32)
         dim = len(rows[0]["embedding"]) // 4

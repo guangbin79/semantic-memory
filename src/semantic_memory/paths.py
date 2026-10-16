@@ -73,11 +73,13 @@ def migrate_legacy() -> bool:
         return False
     lock_path = legacy / _LOCK_NAME
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    acquired = False
     try:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # 并发迁移互斥
         except OSError:
             raise MigrationRefused("另一进程正在迁移旧目录——请稍后重启重试") from None
+        acquired = True
         if _skip(data_dir, legacy):  # 等锁窗口内别的实例可能已迁完，复查
             return False
         live = _live_instance_pid(legacy)
@@ -95,7 +97,8 @@ def migrate_legacy() -> bool:
         return True
     finally:
         os.close(fd)
-        lock_path.unlink(missing_ok=True)
+        if acquired:  # 未获锁（他方持有）不得删除他方的锁文件
+            lock_path.unlink(missing_ok=True)
 
 
 def _skip(data_dir: Path, legacy: Path) -> bool:
