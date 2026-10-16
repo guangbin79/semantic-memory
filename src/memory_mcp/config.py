@@ -53,7 +53,13 @@ class Config:
     @classmethod
     def from_env(cls) -> "Config":
         model = os.environ.get("MEMORY_MODEL_PATH")
-        rerank_model = os.environ.get("MEMORY_RERANK_MODEL")
+        # 门禁 PASSED（.omo/evidence/rerank-gate.md 2026-10-16：recall@5 0.939≥基线 0.909）
+        # 后默认启用：未设 → 常规路径（文件存在即生效，缺失则优雅关闭并告警）；显式设空 = 关闭
+        _data_home = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share")))
+        rerank_model = os.environ.get(
+            "MEMORY_RERANK_MODEL",
+            str(_data_home / "memory-mcp/models/qwen3-reranker-0.6b-q8_0.gguf"),
+        )
         distill_model = os.environ.get("MEMORY_DISTILL_MODEL")
         db_path = Path(os.environ.get("MEMORY_DB_PATH", _default_db()))
         discovery = os.environ.get("MEMORY_DISCOVERY_FILE")
@@ -81,7 +87,7 @@ class Config:
             ttl_stale_days=int(os.environ.get("MEMORY_TTL_STALE_DAYS", "180")),
             maintenance_on_start=os.environ.get("MEMORY_MAINTENANCE_ON_START", "1") == "1",
             dedup_sim=float(os.environ.get("MEMORY_DEDUP_SIM", "0.98")),
-            rerank_model=Path(rerank_model) if rerank_model else None,
+            rerank_model=Path(rerank_model) if rerank_model.strip() else None,
             rerank_candidates=int(os.environ.get("MEMORY_RERANK_CANDIDATES", "20")),
             rerank_budget_ms=int(os.environ.get("MEMORY_RERANK_BUDGET_MS", "500")),
             distill_model=Path(distill_model) if distill_model else None,
