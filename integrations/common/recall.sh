@@ -7,6 +7,8 @@
 #   MEMORY_PLUGIN_URL / MEMORY_PLUGIN_TOKEN / MEMORY_PLUGIN_LIMIT / MEMORY_PLUGIN_BUDGET_CHARS
 #   MEMORY_HARNESS  调用方标识（claude-code / kimi-code / ...，默认 shell）
 #   MEMORY_HOOK     触发钩子名（prompt / compaction / ...，默认 recall）
+#   MEMORY_SESSION_ID  会话标识：同会话 uid 集合不变则不重复注入（保护 LLM 前缀缓存）
+#   MEMORY_PROJECT     项目作用域（非空时随请求体发送，服务端归一化为 git-origin key）
 # 注入成功（有输出）时会 fire-and-forget 上报 /inject/report 遥测。
 set -u
 
@@ -17,19 +19,30 @@ HARNESS="${MEMORY_HARNESS:-shell}"
 HOOK="${MEMORY_HOOK:-recall}"
 QUERY="${1:-}"
 LIMIT="${2:-${MEMORY_PLUGIN_LIMIT:-5}}"
+SESSION_ID="${MEMORY_SESSION_ID:-}"
+PROJECT="${MEMORY_PROJECT:-}"
 
 [ -z "$QUERY" ] && exit 0
 
 AUTH=()
 [ -n "$TOKEN" ] && AUTH=(-H "authorization: Bearer $TOKEN")
 
-BODY=$(jq -nc --arg q "$QUERY" --argjson l "$LIMIT" '{query:$q, limit:$l}')
+BODY=$(jq -nc --arg q "$QUERY" --argjson l "$LIMIT" --arg p "$PROJECT" \
+  '{query:$q, limit:$l} + (if $p != "" then {project:$p} else {} end)')
 RESP=$(curl -fsS --max-time 1.5 -X POST "$BASE/recall" \
         -H 'content-type: application/json' "${AUTH[@]}" -d "$BODY" 2>/dev/null) || exit 0
 
 # 命中条目的 uid 列表（遥测用，最多 50 个）
 UIDS=$(echo "$RESP" | jq -c '[(.hits // [])[].uid][0:50]')
 [ "$UIDS" = "[]" ] && exit 0
+
+# 同会话去重：uid 集合排序哈希；与已注入指纹一致 → 不注入、不上报遥测（保护前缀缓存）
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/semantic-memory"
+if [ -n "$SESSION_ID" ]; then
+  SAFE_ID=$(printf '%s' "$SESSION_ID" | tr -c 'A-Za-z0-9._-' '_')
+  UID_HASH=$(printf '%s' "$UIDS" | jq -r 'sort | .[]' | sha256sum | cut -d' ' -f1)
+  [ "$(cat "$STATE_DIR/$SAFE_ID.uidhash" 2>/dev/null)" = "$UID_HASH" ] && exit 0
+fi
 
 # 注入块：明示"数据非指令"，并剥除内容中的边界标签防止包裹逃逸
 BLOCK=$(echo "$RESP" | jq -r '
@@ -51,4 +64,9 @@ REPORT=$(jq -nc --arg h "$HARNESS" --arg k "$HOOK" --arg q "$QUERY" \
         '{harness:$h, hook:$k, query:($q[0:500]), uids:$u, chars:$c}')
 curl -fsS --max-time 1.5 -X POST "$BASE/inject/report" \
   -H 'content-type: application/json' "${AUTH[@]}" -d "$REPORT" >/dev/null 2>&1 &
+# 记录本会话已注入的 uid 集合指纹（best-effort，失败绝不阻塞钩子）
+if [ -n "$SESSION_ID" ]; then
+  mkdir -p "$STATE_DIR" 2>/dev/null \
+    && printf '%s' "$UID_HASH" > "$STATE_DIR/$SAFE_ID.uidhash" 2>/dev/null || true
+fi
 exit 0
