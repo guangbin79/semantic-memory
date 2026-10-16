@@ -2,9 +2,9 @@
 import numpy as np
 import pytest
 
-from memory_mcp.db import MemoryStore
-from memory_mcp.embedder import Embedder
-from memory_mcp.hybrid import hybrid_recall, rrf_fuse
+from semantic_memory.db import MemoryStore
+from semantic_memory.embedder import Embedder
+from semantic_memory.hybrid import hybrid_recall, rrf_fuse
 
 
 @pytest.fixture()
@@ -83,7 +83,7 @@ def test_cjk_substring_recall(store, no_embedder):
 
 def test_query_instruct_prefix():
     """锁定与 ctx-semantic 一致的非对称嵌入约定：查询带 Instruct 前缀，文档不带。"""
-    from memory_mcp.embedder import format_query
+    from semantic_memory.embedder import format_query
     q = format_query("GDAL 驱动")
     assert q.startswith("Instruct: Given a web search query")
     assert q.endswith("Query: GDAL 驱动")

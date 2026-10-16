@@ -16,7 +16,7 @@ os.environ.pop("MEMORY_TOKEN", None)
 import pytest
 from starlette.testclient import TestClient
 
-from memory_mcp import server
+from semantic_memory import server
 
 
 @pytest.fixture(scope="module")

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from memory_mcp.reranker import Reranker, format_prompt
+from semantic_memory.reranker import Reranker, format_prompt
 
 SYS_SENTENCE = (
     "Judge whether the Document meets the requirements based on the Query and "
@@ -156,7 +156,7 @@ def test_disabled_without_model():
 
 def test_gpu_init_fallback_pid_check(monkeypatch, gguf):
     """加载链：GPU 探针通过但 nvidia-smi 无 pid → 判静默回退 → CPU 重建。"""
-    import memory_mcp.reranker as mod
+    import semantic_memory.reranker as mod
 
     mock = MockRerankModel(scores=[(-0.1, -3.0)])
     monkeypatch.setattr(Reranker, "_new_model", lambda self, use_gpu: mock)
@@ -169,7 +169,7 @@ def test_gpu_init_fallback_pid_check(monkeypatch, gguf):
 
 def test_gpu_oom_rebuilds_cpu_and_retries_once(monkeypatch, gguf):
     """运行期 GPU 推理 OOM → 强制 CPU 重建、整次调用重试一次成功。"""
-    import memory_mcp.reranker as mod
+    import semantic_memory.reranker as mod
 
     gpu_mock = MockRerankModel(fail_docs=True)
     cpu_mock = MockRerankModel(scores=[(-0.1, -3.0)])
@@ -190,7 +190,7 @@ def test_gpu_oom_rebuilds_cpu_and_retries_once(monkeypatch, gguf):
 
 def test_modelslot_shared_with_distiller_kind(monkeypatch, gguf):
     """槽位契约：rerank 走 "rerank" kind，与 distill 互斥分时（LRU=1）。"""
-    from memory_mcp.modelslot import ModelSlot
+    from semantic_memory.modelslot import ModelSlot
 
     slot = ModelSlot()
     mock = MockRerankModel(scores=[(-0.1, -3.0)])

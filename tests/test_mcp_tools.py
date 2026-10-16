@@ -12,7 +12,7 @@ os.environ.pop("MEMORY_TOKEN", None)
 
 import pytest
 
-from memory_mcp import server
+from semantic_memory import server
 
 
 def test_store_and_dedup_flag():

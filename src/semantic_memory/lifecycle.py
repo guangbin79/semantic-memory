@@ -20,7 +20,7 @@ from .db import INSERT_MEMORY_SQL, MemoryStore, content_hash
 from .distiller import Distiller
 from .embedder import Embedder
 
-log = logging.getLogger("memory_mcp.lifecycle")
+log = logging.getLogger("semantic_memory.lifecycle")
 
 
 def ingest_with_dedup(

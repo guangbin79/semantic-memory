@@ -26,7 +26,7 @@ from typing import Final
 import numpy as np
 import numpy.typing as npt
 
-log = logging.getLogger("memory_mcp.embedder")
+log = logging.getLogger("semantic_memory.embedder")
 
 MODEL_NAME: Final = "qwen/qwen3-embedding-0.6b-gguf-q8"  # 与 ctx-semantic 相同的向量键
 DIM: Final = 1024

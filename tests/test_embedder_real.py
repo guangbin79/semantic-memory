@@ -18,7 +18,7 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture(scope="module")
 def emb():
-    from memory_mcp.embedder import Embedder
+    from semantic_memory.embedder import Embedder
     e = Embedder(model_path=MODEL, device="cpu")
     assert e.available, "模型存在但加载失败"
     return e
@@ -35,10 +35,10 @@ def test_dim_norm_and_query_prefix(emb):
 
 def test_semantic_recall_backstops_bm25(tmp_path, emb):
     """trigram 零重叠的查询：BM25 漏召回，向量通道命中。"""
-    from memory_mcp.db import MemoryStore
-    from memory_mcp.embedder import Embedder
-    from memory_mcp.hybrid import hybrid_recall
-    from memory_mcp.lifecycle import ingest_with_dedup
+    from semantic_memory.db import MemoryStore
+    from semantic_memory.embedder import Embedder
+    from semantic_memory.hybrid import hybrid_recall
+    from semantic_memory.lifecycle import ingest_with_dedup
 
     store = MemoryStore(tmp_path / "m.db")
     ingest_with_dedup(store, emb,

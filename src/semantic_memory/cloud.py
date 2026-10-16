@@ -22,7 +22,7 @@ except ImportError:  # fastmcp>=2.3 允许解析到仅携带 httpx 的旧版
     import httpx as httpx2
 import numpy as np
 
-log = logging.getLogger("memory_mcp.cloud")
+log = logging.getLogger("semantic_memory.cloud")
 
 # 注入模式集（移植自 integrations/opencode/memory.ts 的 INJECTION_RE）：
 # 对云端返回的计划 JSON 全文检查——未来若放开 content 入库，此防线强制。

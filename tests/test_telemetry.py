@@ -12,8 +12,8 @@ os.environ.pop("MEMORY_TOKEN", None)
 import pytest
 from starlette.testclient import TestClient
 
-from memory_mcp import server
-from memory_mcp.lifecycle import run_maintenance
+from semantic_memory import server
+from semantic_memory.lifecycle import run_maintenance
 
 
 @pytest.fixture(scope="module")
@@ -89,7 +89,7 @@ def test_web_page_has_telemetry_section(client):
 
 
 def test_percentiles():
-    from memory_mcp.server import percentile
+    from semantic_memory.server import percentile
 
     xs = [float(i) for i in range(1, 101)]  # 已知序列（最近秩）：p50=50, p95=95
     assert percentile(xs, 50) == 50.0
@@ -101,7 +101,7 @@ def test_percentiles():
 
 
 def test_throttle_no_spam():
-    from memory_mcp.server import ALERT_WINDOW_S, plan_alerts
+    from semantic_memory.server import ALERT_WINDOW_S, plan_alerts
 
     last: dict[str, float] = {}
     now = 1000.0

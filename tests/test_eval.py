@@ -20,9 +20,9 @@ os.environ.pop("MEMORY_DISTILL_MODEL", None)
 
 import pytest
 
-from memory_mcp import server
-from memory_mcp.db import MemoryStore
-from memory_mcp.embedder import Embedder
+from semantic_memory import server
+from semantic_memory.db import MemoryStore
+from semantic_memory.embedder import Embedder
 
 FIXTURE = Path(__file__).parent / "fixtures" / "golden.sample.jsonl"
 
@@ -118,7 +118,7 @@ def test_cmd_eval_reports_table_and_json(eval_env, capsys):
     assert report["recall_at_k"]["5"] == pytest.approx(2 / 3)
     assert report["mrr"] == pytest.approx(0.5)
     assert "recall@1=" in out and "recall@5=" in out
-    assert "memory_mcp.distill" not in sys.modules
+    assert "semantic_memory.distill" not in sys.modules
 
 
 def test_golden_missing_file_exits_nonzero(tmp_path, capsys):
@@ -140,7 +140,7 @@ def test_judge_without_env_skips(eval_env, tmp_path, capsys, monkeypatch):
                       encoding="utf-8")
     assert server._cmd_eval(["--golden", str(golden), "--judge"]) == 0
     assert "跳过" in capsys.readouterr().out
-    assert "memory_mcp.distill" not in sys.modules
+    assert "semantic_memory.distill" not in sys.modules
 
 
 def test_judge_without_wiring_exits_zero(eval_env, tmp_path, capsys, monkeypatch):

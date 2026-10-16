@@ -4,9 +4,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from memory_mcp import project
-from memory_mcp.db import MemoryStore
-from memory_mcp.project import backfill_project_keys, normalize_git_url, resolve_project
+from semantic_memory import project
+from semantic_memory.db import MemoryStore
+from semantic_memory.project import backfill_project_keys, normalize_git_url, resolve_project
 
 
 @pytest.fixture(autouse=True)

@@ -26,7 +26,7 @@ from typing import Any, Final
 from .embedder import _pid_vram_on_gpu, _preload_cuda_libs
 from .modelslot import ModelSlot
 
-log = logging.getLogger("memory_mcp.reranker")
+log = logging.getLogger("semantic_memory.reranker")
 
 MAX_DOC_CHARS: Final = 512  # 官方建议的文档截断长度（字符）
 RERANK_N_CTX: Final = 1024  # system+instruct+query+512字符文档 ≯400 token；logits_all 的 scores 矩阵=n_ctx×n_vocab（1024×151936×4B≈622MB）

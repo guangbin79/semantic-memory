@@ -43,7 +43,7 @@ from .project import backfill_project_keys, resolve_project
 from .modelslot import ModelSlot
 from .reranker import Reranker
 
-log = logging.getLogger("memory_mcp")
+log = logging.getLogger("semantic_memory")
 
 # ---------------- 观测面（task14）：召回延迟分位数 + 阈值告警 ----------------
 # 提醒只住观测面（stats/日志/网页）——禁向会话/注入流写入任何告警。
@@ -600,7 +600,7 @@ def _cmd_eval(argv: list[str]) -> int:
     检索侧每次改动都用同一命令对照基线——先测量后加装。
     """
     ap = argparse.ArgumentParser(
-        prog="memory-mcp eval",
+        prog="semantic-memory eval",
         description="对 golden jsonl 逐行跑混合检索，输出 recall@k 与 MRR 基线报告",
     )
     ap.add_argument("--golden", required=True,
@@ -649,13 +649,21 @@ def _cmd_consolidate() -> None:
     print(json.dumps(consolidator.run(store, embedder), ensure_ascii=False))
 
 
-# ---------------- 入口 ----------------
+_USAGE = """usage: semantic-memory [-h] [--stdio] [command]
+
+语义记忆服务（单进程）。默认命令 serve：启动 HTTP 服务（MCP + REST 同端口）。
+管理子命令：purge / backfill / eval / consolidate / distill（详见各 --help）。
+"""
+
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, stream=sys.stderr,
                         format="%(asctime)s %(name)s %(levelname)s %(message)s")
     args = sys.argv[1:]
     cmd = next((a for a in args if not a.startswith("-")), "serve")
+    if cmd == "serve" and ("--help" in args or "-h" in args):
+        print(_USAGE)
+        return
 
     # ---- 管理子命令（维护面：LLM 够不到的地方）----
     if cmd == "purge":

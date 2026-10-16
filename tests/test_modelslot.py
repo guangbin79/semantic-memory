@@ -6,7 +6,7 @@
 """
 import threading
 
-from memory_mcp.modelslot import ModelSlot
+from semantic_memory.modelslot import ModelSlot
 
 
 class MockSlotModel:

@@ -2,15 +2,15 @@
 import numpy as np
 import pytest
 
-from memory_mcp.db import MemoryStore
-from memory_mcp.embedder import Embedder
-from memory_mcp.hybrid import hybrid_recall
+from semantic_memory.db import MemoryStore
+from semantic_memory.embedder import Embedder
+from semantic_memory.hybrid import hybrid_recall
 import numpy as np
 import pytest
 
-from memory_mcp.db import MemoryStore
-from memory_mcp.embedder import Embedder
-from memory_mcp.hybrid import hybrid_recall
+from semantic_memory.db import MemoryStore
+from semantic_memory.embedder import Embedder
+from semantic_memory.hybrid import hybrid_recall
 
 
 @pytest.fixture()

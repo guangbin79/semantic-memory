@@ -7,10 +7,10 @@ import httpx2
 import numpy as np
 import pytest
 
-from memory_mcp.cloud import INJECTION_RE, Consolidator
-from memory_mcp.config import Config
-from memory_mcp.db import MemoryStore
-from memory_mcp.embedder import Embedder
+from semantic_memory.cloud import INJECTION_RE, Consolidator
+from semantic_memory.config import Config
+from semantic_memory.db import MemoryStore
+from semantic_memory.embedder import Embedder
 
 
 @pytest.fixture()
@@ -259,7 +259,7 @@ def test_daily_call_cap_warns_and_stops(store, caplog):
     api = FakeAPI()
     cons = make_consol(api, calls=1)
     assert cons.run(store, emb)["sent"] == 2
-    with caplog.at_level(logging.WARNING, logger="memory_mcp.cloud"):
+    with caplog.at_level(logging.WARNING, logger="semantic_memory.cloud"):
         assert cons.run(store, emb)["skipped"] == "budget"
     assert len(api.requests) == 1  # 超顶当日停发
     assert any(r.levelno == logging.WARNING for r in caplog.records)

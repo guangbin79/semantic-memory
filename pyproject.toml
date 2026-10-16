@@ -3,8 +3,8 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "memory-mcp"
-version = "0.1.0"
+name = "semantic-memory"
+version = "0.2.0"
 description = "Context-relevance sidecar for coding agents: model-semantic-level context retrieval (BM25 + vector + RRF) for opencode v2, with a thin v2 plugin for automatic recall/capture"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -21,7 +21,7 @@ embed = ["llama-cpp-python==0.3.35"]
 dev = ["pytest>=8"]
 
 [project.scripts]
-memory-mcp = "memory_mcp.server:main"
+semantic-memory = "semantic_memory.server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

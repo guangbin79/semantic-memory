@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from memory_mcp.distiller import SYSTEM_PROMPT, Distiller, format_prompt
+from semantic_memory.distiller import SYSTEM_PROMPT, Distiller, format_prompt
 
 
 class MockDistillModel:
@@ -107,7 +107,7 @@ def test_decision_without_rationale_downgrades_to_fact(monkeypatch, gguf, caplog
            '"rationale": "", "tags": []}]')
     mock = MockDistillModel(outputs=[raw])
     d = make_distiller(monkeypatch, gguf, mock)
-    with caplog.at_level(logging.WARNING, logger="memory_mcp.distiller"):
+    with caplog.at_level(logging.WARNING, logger="semantic_memory.distiller"):
         out = d.distill(["原文"], "p")
     assert out[0]["kind"] == "fact"
     assert any("rationale" in r.message for r in caplog.records)
@@ -151,7 +151,7 @@ def test_gpu_init_fallback_pid_check(monkeypatch, gguf):
     """加载链：GPU 探针通过但 nvidia-smi 无 pid → 判静默回退 → CPU 重建。"""
     mock = MockDistillModel(outputs=["[]"])
     monkeypatch.setattr(Distiller, "_new_model", lambda self, use_gpu: mock)
-    monkeypatch.setattr("memory_mcp.distiller._pid_vram_on_gpu", lambda pid: None)
+    monkeypatch.setattr("semantic_memory.distiller._pid_vram_on_gpu", lambda pid: None)
     d = Distiller(gguf, device="cuda")
     assert d.distill(["原文"], "p") == []
     assert d.device == "cpu"
@@ -165,7 +165,7 @@ def test_gpu_oom_rebuilds_cpu_and_retries_once(monkeypatch, gguf):
         Distiller, "_new_model",
         lambda self, use_gpu: gpu_mock if use_gpu else cpu_mock,
     )
-    monkeypatch.setattr("memory_mcp.distiller._pid_vram_on_gpu", lambda pid: "100 MiB")
+    monkeypatch.setattr("semantic_memory.distiller._pid_vram_on_gpu", lambda pid: "100 MiB")
     d = Distiller(gguf, device="cuda")
     out = d.distill(["原文"], "p")
 
@@ -177,7 +177,7 @@ def test_gpu_oom_rebuilds_cpu_and_retries_once(monkeypatch, gguf):
 
 def test_modelslot_shared_with_reranker_kind(monkeypatch, gguf):
     """槽位契约：distill 走 "distill" kind，与 rerank 互斥分时（LRU=1）。"""
-    from memory_mcp.modelslot import ModelSlot
+    from semantic_memory.modelslot import ModelSlot
 
     slot = ModelSlot()
     mock = MockDistillModel(outputs=["[]"])
@@ -194,7 +194,7 @@ def test_modelslot_shared_with_reranker_kind(monkeypatch, gguf):
 
 def test_config_distill_model_env(monkeypatch, tmp_path):
     monkeypatch.setenv("MEMORY_DISTILL_MODEL", str(tmp_path / "m.gguf"))
-    from memory_mcp.config import Config
+    from semantic_memory.config import Config
 
     assert Config.from_env().distill_model == tmp_path / "m.gguf"
     monkeypatch.setenv("MEMORY_DISTILL_MODEL", "")
@@ -203,7 +203,7 @@ def test_config_distill_model_env(monkeypatch, tmp_path):
 
 def test_config_rerank_model_default(monkeypatch, tmp_path):
     """三态语义：未设→常规 XDG 路径；显式空→关闭；空白填充→取值与判空一致。"""
-    from memory_mcp.config import Config
+    from semantic_memory.config import Config
 
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
     monkeypatch.delenv("MEMORY_RERANK_MODEL", raising=False)

@@ -30,7 +30,7 @@ def _spawn(tmp_path, extra_env=None):
     if extra_env:
         env.update(extra_env)
     return subprocess.Popen(
-        [sys.executable, "-m", "memory_mcp.server"],
+        [sys.executable, "-m", "semantic_memory.server"],
         env=env, cwd=REPO, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
 

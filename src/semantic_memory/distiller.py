@@ -25,7 +25,7 @@ from typing import Any, Final
 from .embedder import _pid_vram_on_gpu, _preload_cuda_libs
 from .modelslot import ModelSlot
 
-log = logging.getLogger("memory_mcp.distiller")
+log = logging.getLogger("semantic_memory.distiller")
 
 DISTILL_N_CTX: Final = 8192   # 输入可含整段压缩 transcript（~8000 字符）+ 输出预算
 MAX_NEW_TOKENS: Final = 1024  # 一批 ≤20 条的 JSON 数组输出预算

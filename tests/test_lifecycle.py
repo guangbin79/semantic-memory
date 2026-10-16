@@ -4,10 +4,10 @@ import time
 import numpy as np
 import pytest
 
-from memory_mcp.db import MemoryStore
-from memory_mcp.embedder import Embedder
-from memory_mcp.distiller import Distiller
-from memory_mcp.lifecycle import (
+from semantic_memory.db import MemoryStore
+from semantic_memory.embedder import Embedder
+from semantic_memory.distiller import Distiller
+from semantic_memory.lifecycle import (
     backfill_vectors,
     enqueue_raw,
     flush_distill_queue,
@@ -109,7 +109,7 @@ def test_migration_backfills_hash(tmp_path):
     s.conn.commit()
     s.close()
     s2 = MemoryStore(db)  # 重开触发迁移
-    from memory_mcp.db import content_hash
+    from semantic_memory.db import content_hash
     hit = s2.find_by_hash(content_hash("旧库遗留内容"))
     assert hit and hit["uid"] == "legacy1"
     s2.close()
@@ -218,7 +218,7 @@ def test_cli_purge_dry_run(tmp_path):
     s.close()
     env = {**os.environ, "MEMORY_DB_PATH": str(db), "MEMORY_MODEL_PATH": ""}
     proc = subprocess.run(
-        [sys.executable, "-m", "memory_mcp.server", "purge", "--dry-run"],
+        [sys.executable, "-m", "semantic_memory.server", "purge", "--dry-run"],
         capture_output=True, text=True, env=env, timeout=120,
     )
     assert proc.returncode == 0, proc.stderr
@@ -355,7 +355,7 @@ def test_cli_distill_falls_back_raw(tmp_path):
     env = {**os.environ, "MEMORY_DB_PATH": str(db),
            "MEMORY_MODEL_PATH": "", "MEMORY_DISTILL_MODEL": ""}
     proc = subprocess.run(
-        [sys.executable, "-m", "memory_mcp.server", "distill"],
+        [sys.executable, "-m", "semantic_memory.server", "distill"],
         capture_output=True, text=True, env=env, timeout=120,
     )
     assert proc.returncode == 0, proc.stderr
