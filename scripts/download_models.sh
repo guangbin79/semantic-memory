@@ -33,7 +33,7 @@ if [ "${1:-}" = "--audit" ]; then
   exec python3 - "$PWD" <<'PYEOF'
 """校对 README.md / README.zh-CN.md env 表的每个 MEMORY_* 默认值 == 代码默认值。
 
-双树取值：服务变量读 src/memory_mcp/config.py，插件变量读 opencode-plugin/memory.ts；
+双树取值：服务变量读 src/memory_mcp/config.py，插件变量读 integrations/opencode/memory.ts；
 再反向断言代码里的每个 MEMORY_* env 都出现在文档表中（防文档漂移）。
 """
 import re
@@ -42,7 +42,7 @@ from pathlib import Path
 
 root = Path(sys.argv[1])
 cfg_src = (root / "src/memory_mcp/config.py").read_text(encoding="utf-8")
-ts_src = (root / "opencode-plugin/memory.ts").read_text(encoding="utf-8")
+ts_src = (root / "integrations/opencode/memory.ts").read_text(encoding="utf-8")
 
 EMPTIES = {"", "empty", "空"}
 

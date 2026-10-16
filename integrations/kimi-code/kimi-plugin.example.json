@@ -7,12 +7,12 @@
   "hooks": [
     {
       "event": "UserPromptSubmit",
-      "command": "${PLUGIN_ROOT}/adapters/kimi-code/on-prompt.sh",
+      "command": "${PLUGIN_ROOT}/integrations/kimi-code/on-prompt.sh",
       "timeout": 5
     },
     {
       "event": "PreCompact",
-      "command": "${PLUGIN_ROOT}/adapters/kimi-code/pre-compact.sh",
+      "command": "${PLUGIN_ROOT}/integrations/kimi-code/pre-compact.sh",
       "timeout": 5
     }
   ],

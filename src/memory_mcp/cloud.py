@@ -24,7 +24,7 @@ import numpy as np
 
 log = logging.getLogger("memory_mcp.cloud")
 
-# 注入模式集（移植自 opencode-plugin/memory.ts 的 INJECTION_RE）：
+# 注入模式集（移植自 integrations/opencode/memory.ts 的 INJECTION_RE）：
 # 对云端返回的计划 JSON 全文检查——未来若放开 content 入库，此防线强制。
 INJECTION_RE: Final = re.compile(
     r"ignore\s+(all\s+)?(previous|above|prior)\s+instructions?"

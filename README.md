@@ -18,7 +18,7 @@ forever. Compaction makes the window fit; the sidecar makes compression safe.
   (Qwen3-Embedding GGUF, optional) + RRF fusion + optional local rerank —
   retrieval happens in embedding space, so differently-phrased memories still
   match; async distillation turns raw captures into typed facts
-- opencode v2 plugin (`opencode-plugin/memory.ts`): hooks into
+- opencode v2 plugin (`integrations/opencode/memory.ts`): hooks into
   context / compaction / generate / chat.message / tool execute.after, making
   remembering and recalling automatic
 - Separate process, separate model: never touches the main agent's window or
@@ -56,7 +56,7 @@ forever. Compaction makes the window fit; the sidecar makes compression safe.
 The REST sidecar exists for **multi-harness support**: any agent harness with
 lifecycle hooks (Claude Code, Codex, Kimi Code, …) can wire the control plane as
 "hook event → curl localhost:8765" — only opencode v2 needs an in-process plugin,
-because its hooks live inside the JS runtime. See `adapters/` for per-harness
+because its hooks live inside the JS runtime. See `integrations/` for per-harness
 integrations — Claude Code and Kimi Code are fully adapted, Codex is a template.
 
 Design constraints: the plugin holds zero intelligence (retrieval, embedding and
@@ -124,12 +124,12 @@ env = { MEMORY_DB_PATH = "/data/memory/memory.db", MEMORY_DEVICE = "cpu" }
 
 ```bash
 # 5. opencode v2: install the control-plane plugin (recall injection etc.)
-cp opencode-plugin/memory.ts ~/.config/opencode/plugins/
+cp integrations/opencode/memory.ts ~/.config/opencode/plugins/
 # the plugin directory needs @opencode/plugin (types only):
 #   cd ~/.config/opencode && npm install @opencode/plugin@^2.0.28
 # — or declare it in opencode.jsonc's "plugin" array instead, optionally with
 #   plugin options (see "Configuration" below):
-#   "plugin": [["file:///abs/path/opencode-plugin", {"url": "http://127.0.0.1:9000"}]]
+#   "plugin": [["file:///abs/path/integrations/opencode", {"url": "http://127.0.0.1:9000"}]]
 ```
 
 ## Configuration (environment variables)
@@ -193,7 +193,7 @@ precedence: **env var > plugin options > default**:
 ```jsonc
 {
   "plugin": [
-    ["file:///path/to/semantic-memory-mcp/opencode-plugin",
+    ["file:///path/to/semantic-memory-mcp/integrations/opencode",
      { "url": "http://127.0.0.1:9000", "limit": 8, "tool_capture": ["bash", "gis"] }]
   ]
 }
@@ -478,7 +478,7 @@ pytest            # baseline 43: store / dual-channel recall / soft delete /
                   # stale-usage retention / cloud consolidation (mock transport) /
                   # offline eval / recall latency telemetry & throttled alerts
 
-cd opencode-plugin
+cd integrations/opencode
 npm install       # then:
 npm run typecheck # tsc --strict against @opencode/plugin 2.0.28 types
 npm test          # build + mock-ctx hook assertions against a live service
@@ -499,7 +499,7 @@ line, and resolves the workspace as project — no load errors.
 - [x] Phase 1: MCP tools + hybrid retrieval + REST sidecar (current state)
 - [x] Phase 2: opencode v2 plugin, four hook families (inject / pre-compaction flush
       / explicit remember / tool whitelist)
-- [x] Phase 3a: multi-harness adapters (`adapters/` — Claude Code, Kimi Code, Codex template)
+- [x] Phase 3a: multi-harness adapters (`integrations/` — Claude Code, Kimi Code, Codex template)
 - [x] Phase 3b: lifecycle maintenance — ingest dedup, TTL/purge/VACUUM, vector
       backfill (startup hook + CLI, deliberately off the MCP tool surface)
 - [x] Phase 3c: context-completion evolution — write-side distillation, local

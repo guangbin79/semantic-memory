@@ -35,5 +35,5 @@ DeepSeek Harness 核心未内置 MCP、生态处 developer preview），因此�
 }
 ```
 
-待两家官方钩子能力落地后，可直接复用 `adapters/common/` 的两个脚本升级
+待两家官方钩子能力落地后，可直接复用 `integrations/common/` 的两个脚本升级
 为完整控制面适配。

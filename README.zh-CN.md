@@ -12,7 +12,7 @@ coding agent 上下文管理的**侧车（sidecar）**：提供**模型语义级
 买回本会永久丢失的相关性。压缩让窗口够用，侧车让压缩安全。
 
 - MCP 服务（Python FastMCP）：BM25（FTS5 双通道 porter + trigram）+ 向量（Qwen3-Embedding GGUF，可选）+ RRF 融合 + 可选本地重排——检索发生在嵌入空间，措辞不同也能命中；异步蒸馏把原文捕获消化成 typed facts
-- opencode v2 插件（`opencode-plugin/memory.ts`）：钩住 context / compaction / generate / chat.message / tool execute.after，让"记"和"忆"自动发生
+- opencode v2 插件（`integrations/opencode/memory.ts`）：钩住 context / compaction / generate / chat.message / tool execute.after，让"记"和"忆"自动发生
 - 独立进程、独立模型：不占用主 agent 的窗口与模型，服务宕机会话无感（fail-open）
 
 ## 架构
@@ -45,7 +45,7 @@ coding agent 上下文管理的**侧车（sidecar）**：提供**模型语义级
 REST 侧车是为**多宿主支持**准备的：任何带生命周期钩子的 agent harness
 （Claude Code、Codex、Kimi Code……）都可以把控制面接成"钩子事件 → curl
 localhost:8765"——只有 opencode v2 需要进程内插件，因为它的钩子在 JS 运行时里。
-各家适配见 `adapters/`——Claude Code 与 Kimi Code 为完整适配，Codex 为模板，ZCode/DeepSeek 仅 MCP 说明。
+各家适配见 `integrations/`——Claude Code 与 Kimi Code 为完整适配，Codex 为模板，ZCode/DeepSeek 仅 MCP 说明。
 
 设计约束：插件零智能（检索/嵌入/存储全在服务端）；服务挂了插件静默跳过；注入集合未变不重复注入（保护 prefix cache）；MCP 脱离插件独立可用。
 度量标准不是"省了多少 token"，而是"当前任务所需相关性的召回率"（recall@k）。
@@ -109,12 +109,12 @@ env = { MEMORY_DB_PATH = "/data/memory/memory.db", MEMORY_DEVICE = "cpu" }
 
 ```bash
 # 5. opencode v2：安装控制面插件（召回注入等）
-cp opencode-plugin/memory.ts ~/.config/opencode/plugins/
+cp integrations/opencode/memory.ts ~/.config/opencode/plugins/
 # 插件目录的 package.json 需有 @opencode/plugin（仅类型）：
 #   cd ~/.config/opencode && npm install @opencode/plugin@^2.0.28
 # ——或不复制，直接在 opencode.jsonc 的 plugin 数组声明，可附带插件
 #   options（见下文"配置"一节）：
-#   "plugin": [["file:///abs/path/opencode-plugin", {"url": "http://127.0.0.1:9000"}]]
+#   "plugin": [["file:///abs/path/integrations/opencode", {"url": "http://127.0.0.1:9000"}]]
 ```
 
 ## 配置（环境变量）
@@ -178,7 +178,7 @@ options > 默认值**：
 ```jsonc
 {
   "plugin": [
-    ["file:///path/to/semantic-memory-mcp/opencode-plugin",
+    ["file:///path/to/semantic-memory-mcp/integrations/opencode",
      { "url": "http://127.0.0.1:9000", "limit": 8, "tool_capture": ["bash", "gis"] }]
   ]
 }
@@ -420,7 +420,7 @@ pytest            # 基线 43 项：存储/双通道召回/软删除/RRF 数学/
                   # git-origin 项目键 / 使用度留存 / 云整合（mock 传输）/
                   # 离线评测 / 召回延迟遥测与节流告警
 
-cd opencode-plugin
+cd integrations/opencode
 npm install       # 然后：
 npm run typecheck # tsc --strict，类型基线 @opencode/plugin 2.0.28
 npm test          # 构建 + mock-ctx 钩子断言（打真实服务；
@@ -439,7 +439,7 @@ npm test          # 构建 + mock-ctx 钩子断言（打真实服务；
 
 - [x] 第一期：MCP 工具 + 混合检索 + REST 侧车（本仓库当前状态）
 - [x] 第二期：opencode v2 插件四族钩子（注入 / 压缩前托管 / 显式记忆 / 工具白名单）
-- [x] 第三期a：多宿主适配器（`adapters/`——Claude Code、Kimi Code、Codex 模板）
+- [x] 第三期a：多宿主适配器（`integrations/`——Claude Code、Kimi Code、Codex 模板）
 - [x] 第三期b：生命周期维护——摄取去重、TTL/purge/VACUUM、向量补嵌
       （启动钩子 + CLI，刻意不在 MCP 工具面）
 - [x] 第三期c：上下文补全演进——写入侧蒸馏、本地重排 + 共享模型槽、

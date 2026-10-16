@@ -2,12 +2,12 @@
 
 The REST sidecar (`/recall` `/ingest` `/health`) makes every control-plane
 adapter a thin "hook event → curl localhost:8765" client. Only opencode v2 needs
-an in-process plugin (`opencode-plugin/memory.ts`); everyone else reuses the
+an in-process plugin (`integrations/opencode/memory.ts`); everyone else reuses the
 shared scripts here.
 
 | Harness | Tier 1: MCP tools | Tier 2: hook automation | Status |
 |---|---|---|---|
-| opencode v2 | ✅ | ✅ in-process plugin | done (`opencode-plugin/`) |
+| opencode v2 | ✅ | ✅ in-process plugin | done (`integrations/opencode/`) |
 | Claude Code | ✅ `mcpServers` | ✅ `UserPromptSubmit` + `PreCompact` | done (`claude-code/`) |
 | Kimi Code | ✅ `mcp_servers` | ✅ `[[hooks]]` or plugin manifest | done (`kimi-code/`) |
 | Codex | ✅ `mcp_servers` | ✅ hooks.json (v0.150+, needs user trust) | template (`codex/`) |
@@ -19,7 +19,7 @@ shared scripts here.
 - `recall.sh "query" [limit]` — prints a `<semantic-memory>` block on stdout
   (empty when no hits). Fail-open, 1.5s budget.
 - `ingest.sh "content" [kind] [source] [project]` — stores one memory. Fail-open.
-- Idle flush notification (`POST /idle`) is opencode-plugin-only (v2 `session.idle`
+- Idle flush notification (`POST /idle`) is opencode-only (v2 `session.idle`
   event). Shell adapters have no idle counterpart — their queued entries (chat/
   compaction sources) flush via the batch threshold (pending ≥ 20) or `memory-mcp
   distill` manually.
@@ -32,7 +32,7 @@ same names as the opencode plugin.
 
 ```bash
 # 1. make scripts executable
-chmod +x adapters/common/*.sh adapters/claude-code/*.sh
+chmod +x integrations/common/*.sh integrations/claude-code/*.sh
 # 2. merge settings.snippet.json into ~/.claude/settings.json
 #    (absolute paths!), or run:
 claude mcp add memory --transport http http://127.0.0.1:8765/mcp

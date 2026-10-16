@@ -466,7 +466,7 @@ console.log("ok  插件 options: env 优先于 options，options 补空缺（lim
 
 // ---------- adapters：显式 remember 分支发 source=remember（grep 逐文件验证） ----------
 
-for (const f of ["../adapters/claude-code/on-prompt.sh", "../adapters/kimi-code/on-prompt.sh"]) {
+for (const f of ["../claude-code/on-prompt.sh", "../kimi-code/on-prompt.sh"]) {
   const g = execFileSync(
     "bash", ["-c", `grep -A2 'remember' '${f}' | grep -F '"remember"' || true`],
     { encoding: "utf8" },
