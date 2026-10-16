@@ -4,7 +4,7 @@
  * 安装：cp memory.ts ~/.config/opencode/plugins/
  * 依赖：零运行时依赖（仅用 fetch/AbortSignal，类型来自 @opencode/plugin）。
  *
- * 配套服务：memory-mcp（Python FastMCP），默认 http://127.0.0.1:8765
+ * 配套服务：semantic-memory（Python 标准库实现），默认 http://127.0.0.1:8765
  * 配置（两条通道，优先级：环境变量 > 插件 options > 默认值）：
  *   环境变量          插件 options 键    说明
  *   MEMORY_PLUGIN_URL           url           服务地址，默认 http://127.0.0.1:8765

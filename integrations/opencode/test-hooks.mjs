@@ -1,6 +1,6 @@
 /**
  * mock-ctx 钩子集成测试：用模拟的 opencode v2 Context 驱动 memory 插件，
- * 打真实的 memory-mcp 服务（默认 http://127.0.0.1:8766），验证链路：
+ * 打真实的 semantic-memory 服务（默认 http://127.0.0.1:8766），验证链路：
  *
  *   1. 服务不可达时钩子静默跳过（fail-open，不抛异常）；
  *   2. prompt 钩子捕获"请记住…"→ /ingest（preference）；
@@ -22,7 +22,7 @@
  *
  * 运行：MEMORY_PLUGIN_URL=http://127.0.0.1:8766 MEMORY_PLUGIN_TOOL_CAPTURE=bash \
  *       MEMORY_DB_PATH=/tmp/xxx.db node test-hooks.mjs
- * （服务需已启动：MEMORY_PORT=8766 MEMORY_DB_PATH=<tmp> .venv/bin/memory-mcp；
+ * （服务需已启动：MEMORY_PORT=8766 MEMORY_DB_PATH=<tmp> .venv/bin/semantic-memory；
  *   MEMORY_DB_PATH 同时供队列断言直读 distill_queue）
  */
 import assert from "node:assert/strict";
@@ -150,7 +150,7 @@ for (let i = 0; i < 60; i++) {
   } catch { /* retry */ }
   await new Promise((r) => setTimeout(r, 500));
 }
-assert.ok(up, "memory-mcp 服务未就绪");
+assert.ok(up, "semantic-memory 服务未就绪");
 console.log("ok  服务就绪:", BASE);
 
 // 2) prompt 钩子：显式记忆捕获

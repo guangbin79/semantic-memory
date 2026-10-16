@@ -3,7 +3,7 @@
 
   "name": "semantic-memory",
   "version": "0.1.0",
-  "description": "Context-relevance sidecar: model-semantic recall of everything compaction discards (backed by memory-mcp at 127.0.0.1:8765)",
+  "description": "Context-relevance sidecar: model-semantic recall of everything compaction discards (backed by the semantic-memory service at 127.0.0.1:8765)",
   "hooks": [
     {
       "event": "UserPromptSubmit",
@@ -15,10 +15,5 @@
       "command": "${PLUGIN_ROOT}/integrations/kimi-code/pre-compact.sh",
       "timeout": 5
     }
-  ],
-  "mcpServers": {
-    "memory": {
-      "url": "http://127.0.0.1:8765/mcp"
-    }
-  }
+  ]
 }

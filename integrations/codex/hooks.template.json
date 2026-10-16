@@ -1,5 +1,5 @@
 {
-  "_comment": "Codex 模板（v0.150+，事件名与 Claude Code 相同）。含 hooks 的插件进不了公开目录，需手动安装并逐个信任钩子——故本目录只给模板不打包。脚本直接复用 integrations/claude-code 下的两个（载荷相同），把路径改为绝对路径。MCP 注册见同目录 config.snippet.toml。",
+  "_comment": "Codex 模板（v0.150+，事件名与 Claude Code 相同）。含 hooks 的插件进不了公开目录，需手动安装并逐个信任钩子——故本目录只给模板不打包。脚本直接复用 integrations/claude-code 下的两个（载荷相同），把路径改为绝对路径。",
 
   "hooks": {
     "UserPromptSubmit": [
@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/absolute/path/to/semantic-memory-mcp/integrations/claude-code/on-prompt.sh",
+            "command": "/absolute/path/to/semantic-memory/integrations/claude-code/on-prompt.sh",
             "timeout": 5
           }
         ]
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/absolute/path/to/semantic-memory-mcp/integrations/claude-code/pre-compact.sh",
+            "command": "/absolute/path/to/semantic-memory/integrations/claude-code/pre-compact.sh",
             "timeout": 5
           }
         ]

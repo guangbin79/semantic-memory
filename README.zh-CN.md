@@ -1,6 +1,9 @@
-# semantic-memory-mcp
+# semantic-memory
 
 **[English](README.md) | [中文](README.zh-CN.md)**
+
+> **已更名** —— 本项目先前以 `semantic-memory-mcp` 发布；旧默认家目录
+> `~/.local/share/memory-mcp/` 的数据会在首次启动时自动迁移（见下文「统一家目录」）。
 
 coding agent 上下文管理的**侧车（sidecar）**：提供**模型语义级**的上下文检索，
 确保上下文相关性不丢失。
@@ -11,7 +14,7 @@ coding agent 上下文管理的**侧车（sidecar）**：提供**模型语义级
 **当前任务**相关时被自动找回注入。它花一笔受预算约束的 token（注入块），
 买回本会永久丢失的相关性。压缩让窗口够用，侧车让压缩安全。
 
-- MCP 服务（Python FastMCP）：BM25（FTS5 双通道 porter + trigram）+ 向量（Qwen3-Embedding GGUF，可选）+ RRF 融合 + 可选本地重排——检索发生在嵌入空间，措辞不同也能命中；异步蒸馏把原文捕获消化成 typed facts
+- 自包含 HTTP 服务（纯 Python 标准库，零第三方依赖）：BM25（FTS5 双通道 porter + trigram）+ 向量（Qwen3-Embedding GGUF，可选）+ RRF 融合 + 可选本地重排——检索发生在嵌入空间，措辞不同也能命中；异步蒸馏把原文捕获消化成 typed facts
 - opencode v2 插件（`integrations/opencode/memory.ts`）：钩住 context / compaction / generate / chat.message / tool execute.after，让"记"和"忆"自动发生
 - 独立进程、独立模型：不占用主 agent 的窗口与模型，服务宕机会话无感（fail-open）
 
@@ -29,9 +32,9 @@ coding agent 上下文管理的**侧车（sidecar）**：提供**模型语义级
 └──────────────────────┬────────────────────────────────────┘
                        │ HTTP 127.0.0.1:8765（Bearer token 可选）
 ┌──────────────────────▼────────────────────────────────────┐
-│  memory-mcp 服务（单进程双接口）                            │
-│  MCP /mcp：memory_store / recall / forget / list / stats  │
-│  REST 侧车：/recall /ingest /idle /health（插件专用）      │
+│  semantic-memory 服务（单进程，标准库 http.server）        │
+│  REST API：/recall /ingest /idle /health + 浏览页         │
+│  opencode 原生工具：memory_store / memory_recall          │
 │  SQLite + FTS5(porter|trigram) + 向量BLOB，RRF(k=60)      │
 │                                                          │
 │  检索侧：RRF → 冗余上限 → 本地重排                        │
@@ -42,80 +45,107 @@ coding agent 上下文管理的**侧车（sidecar）**：提供**模型语义级
 └───────────────────────────────────────────────────────────┘
 ```
 
-REST 侧车是为**多宿主支持**准备的：任何带生命周期钩子的 agent harness
+HTTP API 为**多宿主支持**而生：任何带生命周期钩子的 agent harness
 （Claude Code、Codex、Kimi Code……）都可以把控制面接成"钩子事件 → curl
 localhost:8765"——只有 opencode v2 需要进程内插件，因为它的钩子在 JS 运行时里。
-各家适配见 `integrations/`——Claude Code 与 Kimi Code 为完整适配，Codex 为模板，ZCode/DeepSeek 仅 MCP 说明。
+各家接线见 `integrations/` 与快速开始里的支持矩阵。
 
-设计约束：插件零智能（检索/嵌入/存储全在服务端）；服务挂了插件静默跳过；注入集合未变不重复注入（保护 prefix cache）；MCP 脱离插件独立可用。
+设计约束：插件零智能（检索/嵌入/存储全在服务端）；服务挂了插件静默跳过；注入集合未变不重复注入（保护 prefix cache）；服务可独立运行——不装任何插件，HTTP API 与浏览页照常可用。
 度量标准不是"省了多少 token"，而是"当前任务所需相关性的召回率"（recall@k）。
 
 ## 快速开始
 
-```bash
-# 1. 安装服务（建议 uv 或 venv）
-pip install -e .                # 纯 BM25 模式即可用
-pip install -e ".[embed]"       # 需要向量通道时（编译 llama-cpp-python）
+### 零仪式安装（三档任选）
 
-# 2.（可选）下载模型
-bash scripts/download_model.sh   # 嵌入 → MEMORY_MODEL_PATH（向量通道）
-bash scripts/download_models.sh  # 蒸馏 + 重排 → MEMORY_DISTILL_MODEL / MEMORY_RERANK_MODEL
+| 档位 | 命令 | 得到什么 |
+|---|---|---|
+| 0 —— 源码直跑，零安装 | `PYTHONPATH=src python3 -m semantic_memory serve` | 裸 python3 ≥ 3.11 直接跑，零第三方依赖（纯 BM25；缺 numpy → 向量腿自关，附自解释安装提示） |
+| 1 —— pip 用户安装 | `pip install --user .` | `semantic-memory` 命令行入口，仍是零依赖 |
+| 2 —— 向量 / 全栈 | `pip install ".[vector]"` 或 `pip install ".[embed]"` | +numpy（向量腿）/ +llama-cpp-python（本地 GGUF 推理） |
 
-# 3. 启动服务（HTTP 模式，MCP 与 REST 同端口）
-memory-mcp                      # http://127.0.0.1:8765/mcp
-memory-mcp --stdio              # stdio 模式（仅 MCP 工具，无 REST 侧车）
+第 2 档的模型按通道可选：`bash scripts/download_model.sh`（嵌入 →
+`MEMORY_MODEL_PATH`）与 `bash scripts/download_models.sh`（蒸馏 + 重排 →
+`MEMORY_DISTILL_MODEL` / `MEMORY_RERANK_MODEL`）——也可以完全跳过手动步骤，
+用下面的一键安装。
 
-# 4. 在各 harness 注册 MCP 服务器——两种模式二选一
-```
+### 一键安装（探测 → 校验下载 → 写配置 → 冒烟）
 
-**模式 A——共享 HTTP 服务**（推荐：全 harness 共享同一记忆库；端口在服务
-启动侧决定，客户端只引用地址）：
-
-```jsonc
-// opencode v2：~/.config/opencode/opencode.jsonc
-{ "mcp": { "memory": { "type": "remote", "url": "http://127.0.0.1:8765/mcp",
-    "headers": { "Authorization": "Bearer {env:MEMORY_TOKEN}" } } } }  // 仅设了 MEMORY_TOKEN 时需要 headers
-```
-
-```json
-// Claude Code：.mcp.json
-{ "mcpServers": { "memory": { "type": "http",
-    "url": "http://127.0.0.1:8765/mcp" } } }
-```
-
-**模式 B——stdio 本地**（每个客户端各自拉起 `memory-mcp --stdio` 子进程；
-设置经配置的 env 字段注入——此模式下这是唯一传参通道；无端口、无
-REST 侧车）：
-
-```jsonc
-// opencode v2：opencode.jsonc（字段名 `environment`，依 @opencode-ai/sdk 类型）
-{ "mcp": { "memory": { "type": "local", "command": ["memory-mcp", "--stdio"],
-    "environment": { "MEMORY_DB_PATH": "/data/memory/memory.db", "MEMORY_DEVICE": "cuda" } } } }
-```
-
-```json
-// Claude Code：.mcp.json
-{ "mcpServers": { "memory": { "command": "memory-mcp", "args": ["--stdio"],
-    "env": { "MEMORY_DB_PATH": "/data/memory/memory.db", "MEMORY_DEVICE": "cpu" } } } }
-```
-
-```toml
-# Codex：~/.codex/config.toml
-[mcp_servers.memory]
-command = "memory-mcp"
-args = ["--stdio"]
-env = { MEMORY_DB_PATH = "/data/memory/memory.db", MEMORY_DEVICE = "cpu" }
-```
+人，一条 curl（钉 release tag v0.2.0）：
 
 ```bash
-# 5. opencode v2：安装控制面插件（召回注入等）
+curl -fsSL \
+  https://raw.githubusercontent.com/guangbin79/semantic-memory-mcp/v0.2.0/scripts/setup.sh \
+  | bash -s -- --profile full --json --yes
+```
+
+agent（仓库已签出）：
+
+```bash
+bash scripts/setup.sh --profile full --json --yes
+```
+
+两者都会建出完全自立的 `~/semantic-memory-mcp/`（venv + sha256 校验下载模型 +
+`config.toml` + 冒烟）。`--profile` 选档：`full`（嵌入+蒸馏+重排，默认）/
+`embed` / `bm25`（零下载）。`--json` 报告为机器可读单行；之后一切命令都是
+`~/semantic-memory-mcp/venv/bin/semantic-memory …`。
+
+### 起服
+
+```bash
+semantic-memory serve    # 或：~/semantic-memory-mcp/venv/bin/semantic-memory serve
+# → http://127.0.0.1:8765  （REST API + 浏览页；MEMORY_PORT=0 = OS 随机端口）
+```
+
+### 接线（生命周期钩子，而非工具协议）
+
+| 宿主 | 支持 | 接线方式 |
+|---|---|---|
+| opencode v2 | ✅ | 进程内插件——hooks **加** 原生 `memory_store` / `memory_recall` 工具（`integrations/opencode/`） |
+| Claude Code | ✅ | hooks：`UserPromptSubmit` + `PreCompact`（`integrations/claude-code/`） |
+| Kimi Code | ✅ | hooks：`[[hooks]]` 或插件清单（`integrations/kimi-code/`） |
+| Codex | ⚠️ | 仅模板——hook 插件需逐 hook 用户信任（`integrations/codex/`） |
+| ZCode / DeepSeek Harness | ❌ | 无生命周期钩子；MCP 无法承接（hooks 是进程/HTTP 生命周期事件，不是可调用工具）——待其官方提供 hooks 后重评 |
+
+opencode v2（唯一进程内集成）：
+
+```bash
 cp integrations/opencode/memory.ts ~/.config/opencode/plugins/
 # 插件目录的 package.json 需有 @opencode/plugin（仅类型）：
 #   cd ~/.config/opencode && npm install @opencode/plugin@^2.0.28
 # ——或不复制，直接在 opencode.jsonc 的 plugin 数组声明，可附带插件
 #   options（见下文"配置"一节）：
-#   "plugin": [["file:///abs/path/integrations/opencode", {"url": "http://127.0.0.1:9000"}]]
+#   "plugin": [["file:///abs/path/to/semantic-memory/integrations/opencode", {"url": "http://127.0.0.1:9000"}]]
 ```
+
+其余宿主都是"钩子事件 → curl localhost:8765"的薄适配器——见
+`integrations/README.md`。
+
+### 统一家目录：`~/semantic-memory-mcp/`
+
+| 路径 | 内容 |
+|---|---|
+| `~/semantic-memory-mcp/venv/` | 自带虚拟环境（一键安装） |
+| `~/semantic-memory-mcp/models/` | GGUF 模型（嵌入 / 蒸馏 / 重排） |
+| `~/semantic-memory-mcp/data/memory.db` | SQLite 记忆库（`MEMORY_DB_PATH` 默认） |
+| `~/semantic-memory-mcp/config.toml` | 文件配置层：env > 此文件 > 内置默认 |
+
+解析序：`MEMORY_DATA_DIR` > 显式 `XDG_DATA_HOME`（→
+`$XDG_DATA_HOME/memory-mcp/`）> `~/semantic-memory-mcp/`。**旧目录自动迁移**：
+首次启动时，改名前的 `~/.local/share/memory-mcp/` 会整体平移进来——先
+wal_checkpoint，逐文件 sha256 校验，旧服务还在跑则拒迁，旧目录最终只留一个
+`MIGRATED` 指针文件。幂等；未校验通过绝不删数据。
+
+### 分层严格启动
+
+服务拒绝半配置启动（宁可大声失败，不要静默降级）：
+
+- **全未配置、无 `config.toml`** → 招募模式：纯 BM25 合法运行，附指向
+  `semantic-memory setup` 的安装提示。
+- **已配置（env 或 `config.toml`）但模型文件缺失** → 拒启 `exit 2`，指明缺失
+  路径与修复用的 setup 命令。
+- **`config.toml` 在场** → 按 setup 写入的 profile 严格生效。
+- **`MEMORY_ALLOW_BM25_ONLY=1`**（或文件内 `allow_bm25_only = true`）→ 恒放行，
+  显式的纯 BM25 逃生门。
 
 ## 配置（环境变量）
 
@@ -123,19 +153,20 @@ cp integrations/opencode/memory.ts ~/.config/opencode/plugins/
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `MEMORY_DB_PATH` | `~/.local/share/memory-mcp/memory.db` | 数据库路径 |
+| `MEMORY_DATA_DIR` | `~/semantic-memory-mcp/`（解析序：此 env > 显式 `XDG_DATA_HOME` → `$XDG_DATA_HOME/memory-mcp/` > 默认家目录） | 数据家目录覆写：models/ data/ config.toml 都在其下 |
+| `MEMORY_DB_PATH` | `~/semantic-memory-mcp/data/memory.db` | 数据库路径（只覆 db 本身；家目录其余部分不受影响） |
 | `MEMORY_MODEL_PATH` | 空 | 嵌入 GGUF 模型路径；空 = 纯 BM25 降级 |
 | `MEMORY_DEVICE` | `cuda` | 嵌入设备：`cuda`（默认，失败自动回退 CPU）/ `cpu` |
 | `MEMORY_EMBED_DIM` | `1024` | 嵌入维度 |
 | `MEMORY_HOST` / `MEMORY_PORT` | `127.0.0.1` / `8765` | 绑定地址；端口 `0` = OS 随机分配 |
 | `MEMORY_DISCOVERY_FILE` | `<db>.server.json` | 服务发现文件；`off` = 关闭 |
-| `MEMORY_TOKEN` | 空 | REST 侧车与 `/mcp` 端点共用 Bearer 鉴权；绑非回环地址时**必配** |
+| `MEMORY_TOKEN` | 空 | HTTP API 的 Bearer 鉴权；绑非回环地址时**必配** |
 | `MEMORY_RECALL_LIMIT` | `5` | 请求未带 limit 时的默认召回条数 |
 | `MEMORY_RRF_K` | `60` | RRF 融合常数 |
 | `MEMORY_RECALL_MIN_COSINE` | `0.45` | 纯向量命中的余弦门限（BM25 命中恒放行）；`0` = 关闭 |
 | `MEMORY_RECALL_MAX_COSINE` | `0.92` | 冗余上限：纯向量命中超过此值按冗余出局（BM25 不受影响）；`1.0` = 关闭 |
 | `MEMORY_INJECT_BOOST` | `0.15` | 遥测反哺：score × (1 + α·ln(1+注入次数))；`0` = 关闭 |
-| `MEMORY_RERANK_MODEL` | `<数据目录>/memory-mcp/models/qwen3-reranker-0.6b-q8_0.gguf` | 重排 GGUF（**仅 ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF**——官方转换，社区镜像可能缺 rank 头）；默认指向常规路径（门禁 2026-10-16 PASSED：recall@5 0.939 vs 基线 0.909）——文件在即启用，缺失优雅关闭并告警；设空禁用 |
+| `MEMORY_RERANK_MODEL` | `~/semantic-memory-mcp/models/qwen3-reranker-0.6b-q8_0.gguf` | 重排 GGUF（**仅 ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF**——官方转换，社区镜像可能缺 rank 头）；默认指向常规路径（门禁 2026-10-16 PASSED：recall@5 0.939 vs 基线 0.909）——文件在即启用，缺失优雅关闭并告警；设空禁用 |
 
 **云通道隐私。** 配置 `MEMORY_CLOUD_BASE_URL` + `MEMORY_CLOUD_API_KEY` + `MEMORY_CLOUD_MODEL`（且 `MEMORY_CLOUD_ENABLED` ≠ `0`，默认）即意味着**记忆内容会发送至该端点**——经确定性预过滤的近邻簇成员及其直接邻域，绝非全库。云端只返回**元数据操作计划**（按 uid 的 `supersede`/`touch`）：云生成的任何内容都不入库，计划中出现疑似注入模式即整批丢弃。每日硬顶（`MEMORY_CLOUD_DAILY_MAX_CALLS` / `MEMORY_CLOUD_DAILY_MAX_TOKENS`）是进程内存计数——**服务重启即重置**。`MEMORY_CLOUD_ENABLED=0` 是优先级最高的 kill switch。
 | `MEMORY_RERANK_CANDIDATES` | `20` | RRF 融合后送入重排的候选条数 |
@@ -154,6 +185,7 @@ cp integrations/opencode/memory.ts ~/.config/opencode/plugins/
 | `MEMORY_TTL_STALE_DAYS` | `180` | 使用度留存：`fact`/`artifact` 超此天数未被召回，下次 purge 时软删（NULL 按 created_at；`preference`/`decision` 豁免）；`0` = 关闭 |
 | `MEMORY_MAINTENANCE_ON_START` | `1` | 服务启动时运行维护例程 |
 | `MEMORY_DEDUP_SIM` | `0.98` | 向量近似去重阈值（同 project 内） |
+| `MEMORY_ALLOW_BM25_ONLY` | `0` | 第 0 档逃生门：`=1` 时即使 `config.toml` 在场也允许纯 BM25 启动 |
 
 插件：
 
@@ -178,7 +210,7 @@ options > 默认值**：
 ```jsonc
 {
   "plugin": [
-    ["file:///path/to/semantic-memory-mcp/integrations/opencode",
+    ["file:///path/to/semantic-memory/integrations/opencode",
      { "url": "http://127.0.0.1:9000", "limit": 8, "tool_capture": ["bash", "gis"] }]
   ]
 }
@@ -193,15 +225,15 @@ agent 自己拉起服务时可以完全绕开端口占用问题——`MEMORY_POR
 空闲端口，绑定完成的瞬间通过两条通道发布真实地址：
 
 ```bash
-MEMORY_PORT=0 memory-mcp
+MEMORY_PORT=0 semantic-memory
 # stdout（机器可读，单行）：
-# MEMORY_MCP_LISTENING {"url":"http://127.0.0.1:41697","mcp_url":".../mcp","port":41697,"pid":...}
+# MEMORY_LISTENING {"url":"http://127.0.0.1:41697","port":41697,"pid":...}
 # 同一份 JSON 同时写入发现文件：<db>.server.json（可用 MEMORY_DISCOVERY_FILE 覆盖）
 ```
 
 自举流程：spawn → 解析 stdout 行**或**读发现文件 → 把 `url` 填进
-`MEMORY_PLUGIN_URL` / MCP 注册配置。优雅退出（SIGINT/SIGTERM）时撤下文件；
-被 kill -9 时读取方可凭文件内 `pid` 判活。`stdio` 模式无端口，不发布任何信息。
+`MEMORY_PLUGIN_URL`。优雅退出（SIGINT/SIGTERM）时撤下文件；被 kill -9 时
+读取方可凭文件内 `pid` 判活。
 
 ## 索引：接近实时，无重建窗口
 
@@ -215,12 +247,12 @@ MEMORY_PORT=0 memory-mcp
   记忆会被静默丢弃——阻塞会话比漏一条记忆更糟。持久性是 best-effort，
   不是 exactly-once。
 - **向量空洞**：嵌入器未配置期间写入的条目只有 BM25 可检索；装好模型后用
-  `memory-mcp backfill` CLI 一次性追平（见"维护与生命周期"）。
+  `semantic-memory backfill` CLI 一次性追平（见"维护与生命周期"）。
 
 ## 存储布局
 
 一切收在**一个 SQLite 文件**里（`MEMORY_DB_PATH`，默认
-`~/.local/share/memory-mcp/memory.db`）：
+`~/semantic-memory-mcp/data/memory.db`）：
 
 | 对象 | 内容 |
 |---|---|
@@ -322,8 +354,8 @@ RRF 只编码名次，不编码相关强度——"无相关里的最近邻"也�
 
 ## 容量与告警（观测面，不打扰会话）
 
-告警只出现在服务日志与浏览页徽章——绝不注入会话流。`memory_stats` /
-`/api/stats` 暴露 `recall_p50_ms`、`recall_p95_ms`、`distill_queue_len`、
+告警只出现在服务日志与浏览页徽章——绝不注入会话流。`/api/stats` 暴露
+`recall_p50_ms`、`recall_p95_ms`、`distill_queue_len`、
 `cloud_calls_24h`、`entries`（延迟取滚动 100 样本窗口）：
 
 | 信号 | 阈值 | 级别 |
@@ -337,7 +369,7 @@ RRF 只编码名次，不编码相关强度——"无相关里的最近邻"也�
 ## 离线评测（先测量，后加装）
 
 ```bash
-memory-mcp eval --golden FILE [--k 1,3,5] [--judge]
+semantic-memory eval --golden FILE [--k 1,3,5] [--judge]
 ```
 
 golden jsonl 每行 `{query, expect_uids[], project?}`；逐行输出 @k 命中，末尾
@@ -349,9 +381,10 @@ recall@k / MRR 汇总与 JSON 报告。`--judge` 用蒸馏模型对未命中样�
 
 ## 维护与生命周期
 
-保留策略是**配置，不是 LLM 的自由裁量**。批量破坏性操作**刻意不作为 MCP
-工具暴露**——它们待在 prompt 注入够不到的地方：启动钩子和 CLI。agent 只能
-`memory_forget`（单条、用户发起）和 `memory_stats`（观察和建议）。
+保留策略是**配置，不是 LLM 的自由裁量**。批量破坏性操作**刻意不向 agent 暴露**
+——它们待在 prompt 注入够不到的地方：启动钩子和 CLI。agent 面只有
+`memory_store` / `memory_recall`（opencode 原生工具，fail-open）；单条遗忘在
+浏览页 / `DELETE /api/memories/{uid}`。
 
 - **摄取去重**（写入路径内嵌，无人"调用"）：精确内容哈希（全局）或向量
   近似（同 project，余弦 ≥ `MEMORY_DEDUP_SIM`）命中时刷新已有条目时间戳，
@@ -361,12 +394,12 @@ recall@k / MRR 汇总与 JSON 报告。`--judge` 用蒸馏模型对未命中样�
   为 `compaction` 或 `chat` 时落入持久化的 `distill_queue` 表——热路径零 LLM；
   显式 `remember` / `tool` 捕获保持直存。flush 触发器（三路，仅此三路——
   **无启动排空、无 cron**）：下次 `/ingest` 入队时 pending ≥ `MEMORY_DISTILL_BATCH`、
-  `POST /idle` 通知、`memory-mcp distill`（手动）。flush 在 daemon 线程内用
+  `POST /idle` 通知、`semantic-memory distill`（手动）。flush 在 daemon 线程内用
   独立短连接 SQLite 跑（每批 ≤5 行提交，进程内单飞）；蒸馏输出按 typed facts
   落库（`scope=global` → `project` NULL，保留 session id）；蒸馏关闭/失败/
   不可解析 → 原文直存（`stored_raw`）——不差于蒸馏前行为；向量经 `backfill`
   追平。**仅装适配器（shell adapters，无 v2 插件）时无 `/idle` 投递者**：
-  队列内容在批量阈值触发或手动 `memory-mcp distill` 之前不可检索——
+  队列内容在批量阈值触发或手动 `semantic-memory distill` 之前不可检索——
   按设计的有界延迟。
 - **并发契约**：服务仅有的后台工作是**蒸馏 flush 的 daemon 线程**（由 `/idle`、
   批量阈值或 CLI 触发），每次 flush 完成后在同一线程内评估云整合触发。
@@ -376,10 +409,10 @@ recall@k / MRR 汇总与 JSON 报告。`--judge` 用蒸馏模型对未命中样�
   存活——超过 `MEMORY_TTL_STALE_DAYS`（默认 180；NULL 按 created_at）未被召回，
   下次 purge 时软删，被矛盾取代（superseded）的条目一并软删；注入遥测流水按
   `MEMORY_TTL_INJECTION_DAYS` 过期。
-- **`memory-mcp purge`**：硬删软删除条目 → TTL 清理 → 有实际删除才 `VACUUM`。
+- **`semantic-memory purge`**：硬删软删除条目 → TTL 清理 → 有实际删除才 `VACUUM`。
   同一例程在每次服务启动时运行（`MEMORY_MAINTENANCE_ON_START=1`）——
   重启频率对天级粒度的保留策略足够。
-- **`memory-mcp backfill`**：为所有缺向量的活条目补算嵌入（装模型后的
+- **`semantic-memory backfill`**：为所有缺向量的活条目补算嵌入（装模型后的
   一次性追平）。重操作，保持手动。
 
 ## 向量通道（与 ctx-semantic 同源）
@@ -396,7 +429,7 @@ recall@k / MRR 汇总与 JSON 报告。`--judge` 用蒸馏模型对未命中样�
 `cpu` 可选。GPU 路径带确定性回退：模型加载 → 探针嵌入 → **nvidia-smi PID 验证**
 （识别"声称 GPU 实际 CPU"的静默回退）→ 任何失败重建于 CPU 并记日志；
 GPU 运行期嵌入失败（如 OOM）自动 CPU 重建重试一次。无 NVIDIA 环境设
-`MEMORY_DEVICE=cpu` 可跳过 GPU 尝试。`memory_stats` / `/health` 返回实际运行设备。
+`MEMORY_DEVICE=cpu` 可跳过 GPU 尝试。`/api/stats` / `/health` 返回实际运行设备。
 
 ## 多语言全文检索
 
@@ -413,7 +446,7 @@ GPU 运行期嵌入失败（如 OOM）自动 CPU 重建重试一次。无 NVIDIA
 pip install -e ".[dev]"
 pytest            # 基线 43 项：存储/双通道召回/软删除/RRF 数学/CJK 子串/
                   # 查询前缀约定/容错/生命周期去重与 TTL/迁移/REST 与 /api 路由/
-                  # 批量双闸门鉴权/MCP 工具层/随机端口与服务发现/
+                  # 批量双闸门鉴权/
                   # 注入遥测（上报/聚合/TTL/鉴权）/排序后处理（余弦门限、遥测反哺）/
                   # 真实模型向量端到端（MEMORY_MODEL_PATH 可选启用）
                   # + 演进套件：蒸馏队列与 typed-fact 取代 / 重排器与共享模型槽 /
@@ -437,11 +470,11 @@ npm test          # 构建 + mock-ctx 钩子断言（打真实服务；
 
 ## 分期路线
 
-- [x] 第一期：MCP 工具 + 混合检索 + REST 侧车（本仓库当前状态）
+- [x] 第一期：混合检索 + REST 控制面（早期 MCP 工具面已在 v0.2 移除——现在是 hooks-only）
 - [x] 第二期：opencode v2 插件四族钩子（注入 / 压缩前托管 / 显式记忆 / 工具白名单）
 - [x] 第三期a：多宿主适配器（`integrations/`——Claude Code、Kimi Code、Codex 模板）
 - [x] 第三期b：生命周期维护——摄取去重、TTL/purge/VACUUM、向量补嵌
-      （启动钩子 + CLI，刻意不在 MCP 工具面）
+      （启动钩子 + CLI，刻意不在 agent 工具面）
 - [x] 第三期c：上下文补全演进——写入侧蒸馏、本地重排 + 共享模型槽、
       次末位注入 + 冻结头块、云整合、使用度留存、离线评测、观测面
 - [ ] 第四期：两字中文词 bigram 通道（触发条件：纯 BM25 模式出现真实漏召回）、

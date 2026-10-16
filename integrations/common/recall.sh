@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # recall.sh "query text" [limit]
-# 从 memory-mcp REST 侧车召回相关记忆，格式化块输出到 stdout（无命中则无输出）。
+# 从 semantic-memory REST API 召回相关记忆，格式化块输出到 stdout（无命中则无输出）。
 # 所有 harness 的控制面适配共用此脚本。fail-open：服务不可达静默退出 0。
 #
 # 环境变量：

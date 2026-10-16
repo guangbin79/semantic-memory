@@ -1,6 +1,10 @@
-# semantic-memory-mcp
+# semantic-memory
 
 **[English](README.md) | [中文](README.zh-CN.md)**
+
+> **Renamed** — this project was previously published as `semantic-memory-mcp`;
+> data from the old default home `~/.local/share/memory-mcp/` migrates automatically
+> on first start (see "The unified home" below).
 
 A **sidecar** for coding-agent context management: **model-semantic-level** context
 retrieval that keeps context relevance alive.
@@ -14,10 +18,11 @@ becomes relevant to the **current task**. It spends a small, budgeted amount of
 tokens (the injection block) to buy back relevance that would otherwise be lost
 forever. Compaction makes the window fit; the sidecar makes compression safe.
 
-- MCP server (Python FastMCP): BM25 (dual-channel FTS5: porter + trigram) + vectors
-  (Qwen3-Embedding GGUF, optional) + RRF fusion + optional local rerank —
-  retrieval happens in embedding space, so differently-phrased memories still
-  match; async distillation turns raw captures into typed facts
+- Self-contained HTTP service (pure Python stdlib, zero third-party dependencies):
+  BM25 (dual-channel FTS5: porter + trigram) + vectors (Qwen3-Embedding GGUF,
+  optional) + RRF fusion + optional local rerank — retrieval happens in embedding
+  space, so differently-phrased memories still match; async distillation turns raw
+  captures into typed facts
 - opencode v2 plugin (`integrations/opencode/memory.ts`): hooks into
   context / compaction / generate / chat.message / tool execute.after, making
   remembering and recalling automatic
@@ -39,9 +44,9 @@ forever. Compaction makes the window fit; the sidecar makes compression safe.
 └──────────────────────┬───────────────────────────────────┘
                        │ HTTP 127.0.0.1:8765 (optional Bearer token)
 ┌──────────────────────▼───────────────────────────────────┐
-│  memory-mcp service (single process, dual interface)     │
-│  MCP /mcp: memory_store / recall / forget / list / stats │
-│  REST sidecar: /recall /ingest /idle /health             │
+│  semantic-memory service (single process, stdlib http)   │
+│  REST API: /recall /ingest /idle /health + web UI        │
+│  opencode native tools: memory_store / memory_recall     │
 │  SQLite + FTS5(porter|trigram) + vector BLOBs, RRF(k=60) │
 │                                                          │
 │  retrieval: RRF → redundancy ceiling → local rerank      │
@@ -53,84 +58,115 @@ forever. Compaction makes the window fit; the sidecar makes compression safe.
 └──────────────────────────────────────────────────────────┘
 ```
 
-The REST sidecar exists for **multi-harness support**: any agent harness with
+The HTTP API is designed for **multi-harness support**: any agent harness with
 lifecycle hooks (Claude Code, Codex, Kimi Code, …) can wire the control plane as
 "hook event → curl localhost:8765" — only opencode v2 needs an in-process plugin,
 because its hooks live inside the JS runtime. See `integrations/` for per-harness
-integrations — Claude Code and Kimi Code are fully adapted, Codex is a template.
+wiring and the support matrix in Quick start.
 
 Design constraints: the plugin holds zero intelligence (retrieval, embedding and
 storage all live in the service); a dead service means silent skips, never a
 blocked session; no re-injection when the recalled set is unchanged (protects the
-prefix cache); the MCP server is fully usable without the plugin. The metric that
-matters is not "tokens saved" but **recall@k of task-relevant context**.
+prefix cache); the service runs standalone — HTTP API and web UI work with no
+plugin attached. The metric that matters is not "tokens saved" but **recall@k of
+task-relevant context**.
 
 ## Quick start
 
-```bash
-# 1. Install the service (uv or venv recommended)
-pip install -e .                # BM25-only mode works out of the box
-pip install -e ".[embed]"       # add the vector channel (builds llama-cpp-python)
+### Zero-ceremony install (pick one tier)
 
-# 2. (Optional) download models
-bash scripts/download_model.sh   # embedding → MEMORY_MODEL_PATH (vector channel)
-bash scripts/download_models.sh  # distiller + reranker → MEMORY_DISTILL_MODEL / MEMORY_RERANK_MODEL
+| Tier | Command | What you get |
+|---|---|---|
+| 0 — source run, zero install | `PYTHONPATH=src python3 -m semantic_memory serve` | works immediately on a bare python3 ≥ 3.11, zero third-party dependencies (BM25-only; numpy absent → vector leg off with a self-explaining install hint) |
+| 1 — pip user install | `pip install --user .` | the `semantic-memory` console script, still zero dependencies |
+| 2 — vector / full stack | `pip install ".[vector]"` or `pip install ".[embed]"` | +numpy (vector leg) / +llama-cpp-python (local GGUF inference) |
 
-# 3. Start the service (HTTP mode: MCP and REST share one port)
-memory-mcp                      # http://127.0.0.1:8765/mcp
-memory-mcp --stdio              # stdio mode (MCP tools only, no REST sidecar)
+Models for tier 2 are optional per channel: `bash scripts/download_model.sh`
+(embedding → `MEMORY_MODEL_PATH`) and `bash scripts/download_models.sh` (distiller +
+reranker → `MEMORY_DISTILL_MODEL` / `MEMORY_RERANK_MODEL`) — or skip the manual steps
+entirely and use the one-shot setup below.
 
-# 4. Register the MCP server in your harness — pick ONE of two modes
-```
+### One-shot setup (probe → verified download → config → smoke)
 
-**Mode A — shared HTTP service** (recommended: one store shared across
-harnesses; the port is chosen at service startup, clients only reference it):
-
-```jsonc
-// opencode v2: ~/.config/opencode/opencode.jsonc
-{ "mcp": { "memory": { "type": "remote", "url": "http://127.0.0.1:8765/mcp",
-    "headers": { "Authorization": "Bearer {env:MEMORY_TOKEN}" } } } }  // headers only if MEMORY_TOKEN is set
-```
-
-```json
-// Claude Code: .mcp.json
-{ "mcpServers": { "memory": { "type": "http",
-    "url": "http://127.0.0.1:8765/mcp" } } }
-```
-
-**Mode B — stdio local** (each client spawns its own `memory-mcp --stdio`
-child; settings are passed via the config's env field — the only channel here;
-no port and no REST sidecar in this mode):
-
-```jsonc
-// opencode v2: opencode.jsonc  (field name `environment` per @opencode-ai/sdk types)
-{ "mcp": { "memory": { "type": "local", "command": ["memory-mcp", "--stdio"],
-    "environment": { "MEMORY_DB_PATH": "/data/memory/memory.db", "MEMORY_DEVICE": "cuda" } } } }
-```
-
-```json
-// Claude Code: .mcp.json
-{ "mcpServers": { "memory": { "command": "memory-mcp", "args": ["--stdio"],
-    "env": { "MEMORY_DB_PATH": "/data/memory/memory.db", "MEMORY_DEVICE": "cpu" } } } }
-```
-
-```toml
-# Codex: ~/.codex/config.toml
-[mcp_servers.memory]
-command = "memory-mcp"
-args = ["--stdio"]
-env = { MEMORY_DB_PATH = "/data/memory/memory.db", MEMORY_DEVICE = "cpu" }
-```
+Humans, one curl (pinned to release tag v0.2.0):
 
 ```bash
-# 5. opencode v2: install the control-plane plugin (recall injection etc.)
+curl -fsSL \
+  https://raw.githubusercontent.com/guangbin79/semantic-memory-mcp/v0.2.0/scripts/setup.sh \
+  | bash -s -- --profile full --json --yes
+```
+
+Agents with the repo checked out:
+
+```bash
+bash scripts/setup.sh --profile full --json --yes
+```
+
+Both build a fully self-contained `~/semantic-memory-mcp/` (venv + sha256-verified
+model downloads + `config.toml` + smoke test). `--profile` picks the tier:
+`full` (embed + distill + rerank, default) / `embed` / `bm25` (zero download). With
+`--json` the report is one machine-readable line; afterwards everything runs via
+`~/semantic-memory-mcp/venv/bin/semantic-memory …`.
+
+### Start the service
+
+```bash
+semantic-memory serve    # or: ~/semantic-memory-mcp/venv/bin/semantic-memory serve
+# → http://127.0.0.1:8765  (REST API + web UI; MEMORY_PORT=0 = OS-assigned port)
+```
+
+### Wire your harness (lifecycle hooks, not tool protocols)
+
+| Harness | Support | Wiring |
+|---|---|---|
+| opencode v2 | ✅ | in-process plugin — hooks **and** native `memory_store` / `memory_recall` tools (`integrations/opencode/`) |
+| Claude Code | ✅ | hooks: `UserPromptSubmit` + `PreCompact` (`integrations/claude-code/`) |
+| Kimi Code | ✅ | hooks: `[[hooks]]` or plugin manifest (`integrations/kimi-code/`) |
+| Codex | ⚠️ | template only — hook plugins need per-hook user trust (`integrations/codex/`) |
+| ZCode / DeepSeek Harness | ❌ | no lifecycle hooks available; MCP cannot deliver them (hooks are process/HTTP lifecycle events, not invocable tools) — revisit when those harnesses ship hooks |
+
+opencode v2 (the only in-process integration):
+
+```bash
 cp integrations/opencode/memory.ts ~/.config/opencode/plugins/
 # the plugin directory needs @opencode/plugin (types only):
 #   cd ~/.config/opencode && npm install @opencode/plugin@^2.0.28
 # — or declare it in opencode.jsonc's "plugin" array instead, optionally with
 #   plugin options (see "Configuration" below):
-#   "plugin": [["file:///abs/path/integrations/opencode", {"url": "http://127.0.0.1:9000"}]]
+#   "plugin": [["file:///abs/path/to/semantic-memory/integrations/opencode", {"url": "http://127.0.0.1:9000"}]]
 ```
+
+Every other harness is a thin "hook event → curl localhost:8765" shell adapter —
+see `integrations/README.md`.
+
+### The unified home: `~/semantic-memory-mcp/`
+
+| Path | Contents |
+|---|---|
+| `~/semantic-memory-mcp/venv/` | self-contained virtualenv (one-shot setup) |
+| `~/semantic-memory-mcp/models/` | GGUF models (embedding / distiller / reranker) |
+| `~/semantic-memory-mcp/data/memory.db` | the SQLite store (default `MEMORY_DB_PATH`) |
+| `~/semantic-memory-mcp/config.toml` | file-config tier: env > this file > built-in defaults |
+
+Resolution order: `MEMORY_DATA_DIR` > explicit `XDG_DATA_HOME` (→
+`$XDG_DATA_HOME/memory-mcp/`) > `~/semantic-memory-mcp/`. **Legacy migration is
+automatic**: on first start, a pre-rename `~/.local/share/memory-mcp/` home is
+moved in — WAL-checkpointed first, sha256-verified per file, refused while a live
+old instance holds it, and the old directory is left with a single `MIGRATED`
+pointer file. Idempotent; nothing is ever deleted unverified.
+
+### Tiered strict startup
+
+The service refuses to start half-configured (fail loudly instead of silently
+degraded):
+
+- **Nothing configured, no `config.toml`** → recruit mode: BM25-only runs legally,
+  with an install hint pointing at `semantic-memory setup`.
+- **Configured (env or `config.toml`) but the model file is missing** → refused with
+  `exit 2`, the offending path, and the setup command that fixes it.
+- **`config.toml` present** → strict per the profile setup wrote.
+- **`MEMORY_ALLOW_BM25_ONLY=1`** (or `allow_bm25_only = true` in the file) → always
+  allowed; the explicit BM25-only escape hatch.
 
 ## Configuration (environment variables)
 
@@ -138,19 +174,20 @@ Service:
 
 | Variable | Default | Description |
 |---|---|---|
-| `MEMORY_DB_PATH` | `~/.local/share/memory-mcp/memory.db` | Database path |
+| `MEMORY_DATA_DIR` | `~/semantic-memory-mcp/` (resolution: this env > explicit `XDG_DATA_HOME` → `$XDG_DATA_HOME/memory-mcp/` > default home) | Data home override: models/ data/ config.toml all live under it |
+| `MEMORY_DB_PATH` | `~/semantic-memory-mcp/data/memory.db` | Database path (only overrides the db; the rest of the home stays put) |
 | `MEMORY_MODEL_PATH` | empty | Embedding GGUF; empty = BM25-only fallback |
 | `MEMORY_DEVICE` | `cuda` | Embed device: `cuda` (default, auto-falls back to CPU) / `cpu` |
 | `MEMORY_EMBED_DIM` | `1024` | Embedding dimension |
 | `MEMORY_HOST` / `MEMORY_PORT` | `127.0.0.1` / `8765` | Bind address; port `0` = OS-assigned random port |
 | `MEMORY_DISCOVERY_FILE` | `<db>.server.json` | Service-discovery file; `off` = disabled |
-| `MEMORY_TOKEN` | empty | Bearer auth for REST sidecar **and** the `/mcp` endpoint; **required** when binding non-loopback |
+| `MEMORY_TOKEN` | empty | Bearer auth for the HTTP API; **required** when binding non-loopback |
 | `MEMORY_RECALL_LIMIT` | `5` | Default recall limit when a request omits it |
 | `MEMORY_RRF_K` | `60` | RRF fusion constant |
 | `MEMORY_RECALL_MIN_COSINE` | `0.45` | Cosine floor for vector-only hits (BM25 hits always pass); `0` = off |
 | `MEMORY_RECALL_MAX_COSINE` | `0.92` | Redundancy ceiling: vector-only hits above this drop as redundant (BM25 unaffected); `1.0` = off |
 | `MEMORY_INJECT_BOOST` | `0.15` | Telemetry feedback: score × (1 + α·ln(1+injections)); `0` = off |
-| `MEMORY_RERANK_MODEL` | `<data>/memory-mcp/models/qwen3-reranker-0.6b-q8_0.gguf` | Reranker GGUF (**ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF only** — official conversion, community builds may lack the rank head); default = conventional path (gate PASSED 2026-10-16: recall@5 0.939 vs 0.909 baseline) — on when the file exists, graceful off + warning when missing; set empty to disable |
+| `MEMORY_RERANK_MODEL` | `~/semantic-memory-mcp/models/qwen3-reranker-0.6b-q8_0.gguf` | Reranker GGUF (**ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF only** — official conversion, community builds may lack the rank head); default = conventional path (gate PASSED 2026-10-16: recall@5 0.939 vs 0.909 baseline) — on when the file exists, graceful off + warning when missing; set empty to disable |
 | `MEMORY_RERANK_CANDIDATES` | `20` | Top-N RRF candidates fed to the reranker |
 | `MEMORY_RERANK_BUDGET_MS` | `500` | Total rerank budget per recall (incl. model-slot load); exceeded = fail-open to RRF order |
 
@@ -169,6 +206,7 @@ Service:
 | `MEMORY_TTL_STALE_DAYS` | `180` | Usage-based retention: `fact`/`artifact` un-recalled this many days are soft-deleted at the next purge (NULL → created_at; `preference`/`decision` exempt); `0` = off |
 | `MEMORY_MAINTENANCE_ON_START` | `1` | Run the maintenance routine at service startup |
 | `MEMORY_DEDUP_SIM` | `0.98` | Cosine threshold for vector near-duplicate ingest dedup |
+| `MEMORY_ALLOW_BM25_ONLY` | `0` | Tier-0 escape hatch: `=1` always allows BM25-only startup even when `config.toml` is present |
 
 Plugin:
 
@@ -193,7 +231,7 @@ precedence: **env var > plugin options > default**:
 ```jsonc
 {
   "plugin": [
-    ["file:///path/to/semantic-memory-mcp/integrations/opencode",
+    ["file:///path/to/semantic-memory/integrations/opencode",
      { "url": "http://127.0.0.1:9000", "limit": 8, "tool_capture": ["bash", "gis"] }]
   ]
 }
@@ -210,17 +248,16 @@ entirely — `MEMORY_PORT=0` lets the OS assign a free port, and the real addres
 is published through two channels the moment the bind completes:
 
 ```bash
-MEMORY_PORT=0 memory-mcp
+MEMORY_PORT=0 semantic-memory
 # stdout (machine-readable, one line):
-# MEMORY_MCP_LISTENING {"url":"http://127.0.0.1:41697","mcp_url":".../mcp","port":41697,"pid":...}
+# MEMORY_LISTENING {"url":"http://127.0.0.1:41697","port":41697,"pid":...}
 # and the same JSON in the discovery file: <db>.server.json (override: MEMORY_DISCOVERY_FILE)
 ```
 
 So the bootstrap flow is: spawn → parse the stdout line **or** read the
-discovery file → point `MEMORY_PLUGIN_URL` / MCP registration at `url`.
+discovery file → point `MEMORY_PLUGIN_URL` at `url`.
 The file is retracted on graceful shutdown (SIGINT/SIGTERM); after a hard kill
-readers can still detect staleness via the embedded `pid`. `stdio` mode has no
-port and publishes nothing.
+readers can still detect staleness via the embedded `pid`.
 
 ## Indexing: near-real-time, no rebuild windows
 
@@ -237,12 +274,12 @@ port and publishes nothing.
   worse than a missed memory. Durability is best-effort, not exactly-once.
 - **Vector gap**: entries written while the embedder is unconfigured stay
   BM25-searchable only; after installing the model, reconcile once with the
-  `memory-mcp backfill` CLI (see Maintenance & lifecycle).
+  `semantic-memory backfill` CLI (see Maintenance & lifecycle).
 
 ## Storage layout
 
 Everything lives in **one SQLite file** (`MEMORY_DB_PATH`, default
-`~/.local/share/memory-mcp/memory.db`):
+`~/semantic-memory-mcp/data/memory.db`):
 
 | Object | Contents |
 |---|---|
@@ -335,10 +372,10 @@ the memory store.
 ## Maintenance & lifecycle
 
 Retention policy is **configuration, not LLM discretion**. Bulk destructive
-operations are deliberately **not exposed as MCP tools** — they live where
-prompt injection cannot reach: the startup hook and the CLI. The agent can only
-`memory_forget` (single entry, user-initiated) and `memory_stats` (observe and
-recommend).
+operations are deliberately **not exposed to the agent** — they live where
+prompt injection cannot reach: the startup hook and the CLI. The agent surface is
+exactly `memory_store` / `memory_recall` (opencode native tools, fail-open);
+single-entry forget lives in the web UI / `DELETE /api/memories/{uid}`.
 
 - **Ingest dedup** (in the write path, nobody "calls" it): exact content-hash
   match (global) or vector near-duplicate (same project, cosine ≥
@@ -351,7 +388,7 @@ recommend).
   — zero LLM on the hot path; explicit `remember` / `tool` captures keep storing
   directly. Flush triggers (three, and that is the whole list — **no startup
   drain, no cron**): queue pending ≥ `MEMORY_DISTILL_BATCH` at the next
-  `/ingest`, a `POST /idle` notification, or `memory-mcp distill`. The flush runs
+  `/ingest`, a `POST /idle` notification, or `semantic-memory distill`. The flush runs
   in a daemon thread on its own short-lived SQLite connection (≤5-row commits,
   one flush at a time per process); Distiller output is stored as typed facts
   (`scope=global` → `project` NULL, session id preserved). Distiller off,
@@ -359,7 +396,7 @@ recommend).
   never worse than pre-distill behavior; vectors reconcile via `backfill`.
   **Adapter-only deployments** (shell adapters, no v2 plugin) have no `/idle`
   sender: queued content stays unsearchable until the batch threshold trips or
-  you run `memory-mcp distill` — bounded staleness, by design.
+  you run `semantic-memory distill` — bounded staleness, by design.
 - **Concurrency contract**: the service's only background work is the
   **distill-flush daemon thread** (spawned by `/idle`, the batch threshold, or
   the CLI), which after each flush evaluates the cloud-consolidation trigger in
@@ -370,11 +407,11 @@ recommend).
   180; NULL counts from created_at) they are soft-deleted at the next purge,
   as are entries superseded by a contradiction; injection telemetry expires
   after `MEMORY_TTL_INJECTION_DAYS`.
-- **`memory-mcp purge`**: hard-deletes soft-deleted entries, applies the TTL,
+- **`semantic-memory purge`**: hard-deletes soft-deleted entries, applies the TTL,
   then `VACUUM` (only when something was actually removed). Same routine runs at
   every service start (`MEMORY_MAINTENANCE_ON_START=1`) — restart frequency is
   enough for day-granularity retention.
-- **`memory-mcp backfill`**: embeds every live entry that has no vector yet
+- **`semantic-memory backfill`**: embeds every live entry that has no vector yet
   (one-shot reconcile after installing the model). Manual because it is heavy.
 
 ## Vector channel (same vectors as ctx-semantic)
@@ -393,7 +430,7 @@ item by item — same model file, same llama-cpp-python pin (0.3.35), same outpu
 embed → **nvidia-smi PID verification** (detects silent CPU fallback) → any failure
 rebuilds on CPU with a log line; a runtime GPU embed failure (e.g. OOM) rebuilds on
 CPU and retries once. On machines without NVIDIA, set `MEMORY_DEVICE=cpu` to skip the
-GPU attempt. `memory_stats` / `/health` report the actual device in use.
+GPU attempt. `/api/stats` / `/health` report the actual device in use.
 
 ## Ranking post-processing (measured, not guessed)
 
@@ -423,7 +460,7 @@ still earns a score. Post-fusion steps:
 ## Capacity & alerting (observability, not interruptions)
 
 Alerts live in service logs and the web UI badge — never injected into a
-session. `memory_stats` / `/api/stats` expose `recall_p50_ms`, `recall_p95_ms`,
+session. `/api/stats` expose `recall_p50_ms`, `recall_p95_ms`,
 `distill_queue_len`, `cloud_calls_24h` and `entries` (latency over a rolling
 100-sample window):
 
@@ -438,7 +475,7 @@ Same-level alerts throttle to once per 10 minutes.
 ## Offline eval (measure, then enable)
 
 ```bash
-memory-mcp eval --golden FILE [--k 1,3,5] [--judge]
+semantic-memory eval --golden FILE [--k 1,3,5] [--judge]
 ```
 
 golden jsonl, one `{query, expect_uids[], project?}` per line; prints per-row
@@ -470,7 +507,7 @@ pip install -e ".[dev]"
 pytest            # baseline 43: store / dual-channel recall / soft delete /
                   # RRF math / CJK substring / query-prefix contract / fault
                   # tolerance / lifecycle dedup & TTL / migration / REST & /api
-                  # routes / bulk double-gate auth / MCP tool layer /
+                  # routes / bulk double-gate auth /
                   # random-port serve & discovery / injection telemetry /
                   # ranking post-processing / real-model vector E2E (opt-in)
                   # + evolution suites: distill queue & typed-fact supersede /
@@ -496,12 +533,12 @@ line, and resolves the workspace as project — no load errors.
 
 ## Roadmap
 
-- [x] Phase 1: MCP tools + hybrid retrieval + REST sidecar (current state)
+- [x] Phase 1: hybrid retrieval + REST control plane (an earlier MCP tool surface was removed in v0.2 — hooks-only)
 - [x] Phase 2: opencode v2 plugin, four hook families (inject / pre-compaction flush
       / explicit remember / tool whitelist)
 - [x] Phase 3a: multi-harness adapters (`integrations/` — Claude Code, Kimi Code, Codex template)
 - [x] Phase 3b: lifecycle maintenance — ingest dedup, TTL/purge/VACUUM, vector
-      backfill (startup hook + CLI, deliberately off the MCP tool surface)
+      backfill (startup hook + CLI, deliberately off the agent-facing tool surface)
 - [x] Phase 3c: context-completion evolution — write-side distillation, local
       rerank + shared model slot, sub-final injection + frozen head block,
       cloud consolidation, usage-based retention, offline eval, observability

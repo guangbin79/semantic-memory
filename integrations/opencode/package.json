@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Thin opencode v2 control-plane plugin for memory-mcp (zero runtime deps)",
+  "description": "Thin opencode v2 control-plane plugin for the semantic-memory service (zero runtime deps)",
   "main": "./memory.ts",
   "exports": {
     ".": "./memory.ts",
