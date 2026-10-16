@@ -527,12 +527,11 @@ def _announce(port: int) -> dict:
     """绑定完成后对外发布真实地址：发现文件 + stdout 机器可读行。
 
     agent 自举流程：spawn 本进程（MEMORY_PORT=0）→ 读 discovery_file
-    或解析 stdout 的 MEMORY_MCP_LISTENING 行 → 得到 url。
+    或解析 stdout 的 MEMORY_LISTENING 行 → 得到 url。
     """
     url = f"http://{cfg.host}:{port}"
     info = {
         "url": url,
-        "mcp_url": f"{url}/mcp",
         "port": port,
         "host": cfg.host,
         "pid": os.getpid(),
@@ -544,8 +543,8 @@ def _announce(port: int) -> dict:
     if f is not None:
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_text(json.dumps(info, ensure_ascii=False, indent=2))
-    print(f"MEMORY_MCP_LISTENING {json.dumps(info, ensure_ascii=False)}", flush=True)
-    log.info("listening on %s (mcp: %s/mcp)", url, url)
+    print(f"MEMORY_LISTENING {json.dumps(info, ensure_ascii=False)}", flush=True)
+    log.info("listening on %s", url)
     return info
 
 

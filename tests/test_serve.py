@@ -68,8 +68,10 @@ def test_random_port_discovery(tmp_path):
         out, err = proc.communicate(timeout=30)
 
     # stdout 机器可读行（agent spawn 场景的第二条发现通道）
-    line = next(l for l in out.splitlines() if l.startswith("MEMORY_MCP_LISTENING "))
-    assert json.loads(line.split(" ", 1)[1])["port"] == info["port"]
+    line = next(l for l in out.splitlines() if l.startswith("MEMORY_LISTENING "))
+    payload = json.loads(line.split(" ", 1)[1])
+    assert payload["port"] == info["port"]
+    assert "mcp_url" not in payload
     # 优雅退出后撤下发现文件
     assert not disc.exists()
 
