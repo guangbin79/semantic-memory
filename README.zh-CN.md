@@ -11,7 +11,7 @@ coding agent 上下文管理的**侧车（sidecar）**：提供**模型语义级
 **当前任务**相关时被自动找回注入。它花一笔受预算约束的 token（注入块），
 买回本会永久丢失的相关性。压缩让窗口够用，侧车让压缩安全。
 
-- MCP 服务（Python FastMCP）：BM25（FTS5 双通道 porter + trigram）+ 向量（Qwen3-Embedding-0.6B GGUF，可选）+ RRF 融合——检索发生在嵌入空间，措辞不同也能命中
+- MCP 服务（Python FastMCP）：BM25（FTS5 双通道 porter + trigram）+ 向量（Qwen3-Embedding GGUF，可选）+ RRF 融合 + 可选本地重排——检索发生在嵌入空间，措辞不同也能命中；异步蒸馏把原文捕获消化成 typed facts
 - opencode v2 插件（`opencode-plugin/memory.ts`）：钩住 context / compaction / generate / chat.message / tool execute.after，让"记"和"忆"自动发生
 - 独立进程、独立模型：不占用主 agent 的窗口与模型，服务宕机会话无感（fail-open）
 
@@ -19,17 +19,26 @@ coding agent 上下文管理的**侧车（sidecar）**：提供**模型语义级
 
 ```
 ┌─ opencode v2 插件（memory.ts，零依赖，fail-open）────────┐
-│  context/compaction/generate → /recall → 尾部注入         │
+│  context/compaction/generate → /recall → 注入块           │
+│    拼在末条 user 消息之前（次末位）+ 每会话冻结头块        │
+│    （偏好/决定，字节冻结进 event.system）                 │
+│  session.idle → POST /idle（排空蒸馏队列）                │
 │  compaction 前 → /ingest（压缩丢弃 ≠ 记忆永存）            │
-│  chat.message "记住…" → /ingest                          │
+│  chat.message "记住…" / 语义自动捕获 → /ingest            │
 │  tool execute.after（白名单）→ /ingest                    │
 └──────────────────────┬────────────────────────────────────┘
                        │ HTTP 127.0.0.1:8765（Bearer token 可选）
 ┌──────────────────────▼────────────────────────────────────┐
 │  memory-mcp 服务（单进程双接口）                            │
 │  MCP /mcp：memory_store / recall / forget / list / stats  │
-│  REST 侧车：/recall /ingest /health（插件专用）            │
+│  REST 侧车：/recall /ingest /idle /health（插件专用）      │
 │  SQLite + FTS5(porter|trigram) + 向量BLOB，RRF(k=60)      │
+│                                                          │
+│  检索侧：RRF → 冗余上限 → 本地重排                        │
+│  写入侧：蒸馏队列 → 异步 flush → typed facts              │
+│  云通道（配置生效）：整合只返回元数据操作计划——            │
+│    云端内容永不入库                                       │
+│  共享模型槽：嵌入常驻；重排与蒸馏分时复用单槽（LRU=1）      │
 └───────────────────────────────────────────────────────────┘
 ```
 
@@ -48,8 +57,9 @@ localhost:8765"——只有 opencode v2 需要进程内插件，因为它的钩�
 pip install -e .                # 纯 BM25 模式即可用
 pip install -e ".[embed]"       # 需要向量通道时（编译 llama-cpp-python）
 
-# 2.（可选）下载嵌入模型，启用向量通道
-bash scripts/download_model.sh  # 输出 MEMORY_MODEL_PATH 导出语句
+# 2.（可选）下载模型
+bash scripts/download_model.sh   # 嵌入 → MEMORY_MODEL_PATH（向量通道）
+bash scripts/download_models.sh  # 蒸馏 + 重排 → MEMORY_DISTILL_MODEL / MEMORY_RERANK_MODEL
 
 # 3. 启动服务（HTTP 模式，MCP 与 REST 同端口）
 memory-mcp                      # http://127.0.0.1:8765/mcp
@@ -114,16 +124,34 @@ cp opencode-plugin/memory.ts ~/.config/opencode/plugins/
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `MEMORY_DB_PATH` | `~/.local/share/memory-mcp/memory.db` | 数据库路径 |
-| `MEMORY_MODEL_PATH` | 空 | GGUF 模型路径；空 = 纯 BM25 降级 |
+| `MEMORY_MODEL_PATH` | 空 | 嵌入 GGUF 模型路径；空 = 纯 BM25 降级 |
 | `MEMORY_DEVICE` | `cuda` | 嵌入设备：`cuda`（默认，失败自动回退 CPU）/ `cpu` |
+| `MEMORY_EMBED_DIM` | `1024` | 嵌入维度 |
 | `MEMORY_HOST` / `MEMORY_PORT` | `127.0.0.1` / `8765` | 绑定地址；端口 `0` = OS 随机分配 |
 | `MEMORY_DISCOVERY_FILE` | `<db>.server.json` | 服务发现文件；`off` = 关闭 |
-| `MEMORY_TOKEN` | 空 | REST 侧车 Bearer 鉴权；绑非回环地址时**必配** |
+| `MEMORY_TOKEN` | 空 | REST 侧车与 `/mcp` 端点共用 Bearer 鉴权；绑非回环地址时**必配** |
+| `MEMORY_RECALL_LIMIT` | `5` | 请求未带 limit 时的默认召回条数 |
 | `MEMORY_RRF_K` | `60` | RRF 融合常数 |
 | `MEMORY_RECALL_MIN_COSINE` | `0.45` | 纯向量命中的余弦门限（BM25 命中恒放行）；`0` = 关闭 |
+| `MEMORY_RECALL_MAX_COSINE` | `0.92` | 冗余上限：纯向量命中超过此值按冗余出局（BM25 不受影响）；`1.0` = 关闭 |
 | `MEMORY_INJECT_BOOST` | `0.15` | 遥测反哺：score × (1 + α·ln(1+注入次数))；`0` = 关闭 |
+| `MEMORY_RERANK_MODEL` | 空 | 重排 GGUF（**仅 ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF**——官方转换，社区镜像可能缺 rank 头）；空 = 重排关闭（RRF 序直出） |
+
+**云通道隐私。** 配置 `MEMORY_CLOUD_BASE_URL` + `MEMORY_CLOUD_API_KEY` + `MEMORY_CLOUD_MODEL`（且 `MEMORY_CLOUD_ENABLED` ≠ `0`，默认）即意味着**记忆内容会发送至该端点**——经确定性预过滤的近邻簇成员及其直接邻域，绝非全库。云端只返回**元数据操作计划**（按 uid 的 `supersede`/`touch`）：云生成的任何内容都不入库，计划中出现疑似注入模式即整批丢弃。每日硬顶（`MEMORY_CLOUD_DAILY_MAX_CALLS` / `MEMORY_CLOUD_DAILY_MAX_TOKENS`）是进程内存计数——**服务重启即重置**。`MEMORY_CLOUD_ENABLED=0` 是优先级最高的 kill switch。
+| `MEMORY_RERANK_CANDIDATES` | `20` | RRF 融合后送入重排的候选条数 |
+| `MEMORY_RERANK_BUDGET_MS` | `500` | 单次召回的重排总预算（含模型槽加载）；超时整体 fail-open 回 RRF 序 |
+| `MEMORY_DISTILL_MODEL` | 空 | 蒸馏 GGUF（Qwen3-1.7B 非思考）；空 = 蒸馏关闭（flush 时原文直存） |
+| `MEMORY_DISTILL_BATCH` | `20` | 队列 pending ≥ N 触发 flush；`0` = 关闭批量触发 |
+| `MEMORY_CLOUD_ENABLED` | `1` | 云整合 kill switch：`=0` 强制关闭（即使配置了 `MEMORY_CLOUD_*`） |
+| `MEMORY_CLOUD_BASE_URL` | 空 | OpenAI 兼容 `/chat/completions` 端点；空 = 云通道关闭 |
+| `MEMORY_CLOUD_API_KEY` | 空 | 云端 API key；空 = 关闭 |
+| `MEMORY_CLOUD_MODEL` | 空 | 云端模型名；空 = 关闭 |
+| `MEMORY_CLOUD_BATCH_N` | `30` | 待整合候选 ≥ N 自动触发整合 |
+| `MEMORY_CLOUD_DAILY_MAX_CALLS` | `20` | 每日云端调用硬顶；超顶当日停发 |
+| `MEMORY_CLOUD_DAILY_MAX_TOKENS` | `200000` | 每日 token（估算）硬顶 |
 | `MEMORY_TTL_ARTIFACT_DAYS` | `90` | `artifact` 类 TTL 天数；`0` = 不过期 |
 | `MEMORY_TTL_INJECTION_DAYS` | `90` | 注入遥测流水 TTL 天数；`0` = 不过期 |
+| `MEMORY_TTL_STALE_DAYS` | `180` | 使用度留存：`fact`/`artifact` 超此天数未被召回，下次 purge 时软删（NULL 按 created_at；`preference`/`decision` 豁免）；`0` = 关闭 |
 | `MEMORY_MAINTENANCE_ON_START` | `1` | 服务启动时运行维护例程 |
 | `MEMORY_DEDUP_SIM` | `0.98` | 向量近似去重阈值（同 project 内） |
 
@@ -138,9 +166,12 @@ cp opencode-plugin/memory.ts ~/.config/opencode/plugins/
 | `MEMORY_PLUGIN_TOOL_CAPTURE` | 空 | 工具捕获白名单（逗号分隔），如 `gis,bash` |
 | `MEMORY_PLUGIN_AUTOSTART` | `0` | `=1` 时服务未启动则自动 spawn |
 | `MEMORY_PLUGIN_DEBUG` | `0` | `=1` 打印 ctx 形态与解析后配置 |
+| `MEMORY_PLUGIN_INJECT_POSITION` | `tail` | `tail` = 注入块拼在末条 user 消息之前；`system` = 旧行为 `event.system.push` 回退 |
+| `MEMORY_PLUGIN_HEAD_BLOCK` | `1` | 每会话一次的冻结头块（偏好/决定，字节冻结推入 `event.system`）；`=0` 关闭 |
+| `MEMORY_PLUGIN_GLOBAL_MEMORIES` | `1` | 全局记忆两路召回（`/recall` 带 `global_limit=2`）；`=0` 关闭 |
 
 每个 `MEMORY_PLUGIN_*` 变量都有一个插件 options 孪生键（`url`、`token`、
-`limit`、`budget_chars`、`tool_capture`、`autostart`、`debug`），因此也可以
+`limit`、`budget_chars`、`tool_capture`、`autostart`、`debug`、`inject_position`、`head_block`、`global_memories`），因此也可以
 直接在 `opencode.json` 的插件声明处配置——优先级：**环境变量 > 插件
 options > 默认值**：
 
@@ -237,6 +268,7 @@ MEMORY_PORT=0 memory-mcp
 | `GET /api/memories?kind=&project=&limit=&offset=` | 分页浏览，按更新时间倒序 |
 | `GET /api/injections?harness=&project=&limit=&offset=` | 注入遥测，按时间倒序 |
 | `POST /inject/report` | 注入遥测上报（插件/适配器信道，只追加） |
+| `POST /idle` | 通知空闲：daemon 线程排空蒸馏队列（立即 204，鉴权同 /ingest） |
 | `DELETE /api/memories/{uid}` | 单条遗忘（与 CLI 同信任级） |
 | `POST /api/maintenance/purge` | 批量维护（软删除硬清 + TTL + VACUUM） |
 | `POST /api/maintenance/backfill` | 向量补嵌 |
@@ -270,8 +302,7 @@ Top10**、最近 20 次注入流水。shell 适配器（Claude Code / Kimi Code�
 
 ## 排序后处理（实测取值，不是拍的）
 
-RRF 只编码名次，不编码相关强度——"无相关里的最近邻"也会得分。两个
-融合后的处理步骤，均默认开启：
+RRF 只编码名次，不编码相关强度——"无相关里的最近邻"也会得分。融合后处理步骤：
 
 - **余弦门限**（`MEMORY_RECALL_MIN_COSINE=0.45`）：纯向量命中低于门限
   丢弃；BM25 命中恒放行（token 命中本身就是证据）。门限来自真实模型
@@ -279,6 +310,40 @@ RRF 只编码名次，不编码相关强度——"无相关里的最近邻"也�
 - **遥测反哺**（`MEMORY_INJECT_BOOST=0.15`）：被真实注入过的记忆
   score × (1 + α·ln(1+注入次数))。对数抑制富者愈富；注入 2 次即可
   翻转相邻名次。
+- **冗余上限**（`MEMORY_RECALL_MAX_COSINE=0.92`）：纯向量命中余弦超过上限即按
+  冗余出局（"过近 = 已知"）；BM25 命中不受影响；`1.0` = 关闭。
+- **本地重排**（`MEMORY_RERANK_MODEL`，**默认关**）：RRF 融合后 top
+  `MEMORY_RERANK_CANDIDATES=20` 条由 Qwen3-Reranker-0.6B 重打分（completions
+  logprobs，yes/no softmax），硬预算 `MEMORY_RERANK_BUDGET_MS=500`（含模型槽
+  加载）；超预算或任何错误 → 保 RRF 序（fail-open）。同分按 `updated_at` 倒序
+  平决。离线评测在真实 golden 集上证明有效之前保持关闭（见下）。
+
+## 容量与告警（观测面，不打扰会话）
+
+告警只出现在服务日志与浏览页徽章——绝不注入会话流。`memory_stats` /
+`/api/stats` 暴露 `recall_p50_ms`、`recall_p95_ms`、`distill_queue_len`、
+`cloud_calls_24h`、`entries`（延迟取滚动 100 样本窗口）：
+
+| 信号 | 阈值 | 级别 |
+|---|---|---|
+| recall p95 | > 800 ms | WARNING |
+| recall p95 | > 1200 ms | ERROR——超过插件 1.5s 硬超时，注入将静默消失 |
+| 条目数 | > 40000 | INFO——接近暴力扫性能天花板（~50k） |
+
+同级告警 10 分钟内只打一次。
+
+## 离线评测（先测量，后加装）
+
+```bash
+memory-mcp eval --golden FILE [--k 1,3,5] [--judge]
+```
+
+golden jsonl 每行 `{query, expect_uids[], project?}`；逐行输出 @k 命中，末尾
+recall@k / MRR 汇总与 JSON 报告。`--judge` 用蒸馏模型对未命中样本做相关性
+评注（未配蒸馏模型则静默跳过）。纯 CLI——绝不进入任何服务端点。
+`tests/fixtures/golden.sample.jsonl` 仅为 3 行格式示例；闸门用的真实集
+（从你自己的记忆库构建 ≥30 条真实查询）决定重排默认：**在真实集上 eval
+显示 recall@5 ≥ RRF 基线之前，重排保持关闭。**
 
 ## 维护与生命周期
 
@@ -290,12 +355,28 @@ RRF 只编码名次，不编码相关强度——"无相关里的最近邻"也�
   近似（同 project，余弦 ≥ `MEMORY_DEDUP_SIM`）命中时刷新已有条目时间戳，
   不新增——重复出现视为"再次被证实相关"。这直接掐住压缩托管类来源反复
   存入近似内容导致的增长斜率。
-- **保留分层**：`preference` / `decision` / `fact` 永久；`artifact`
-  （工具捕获）按 `MEMORY_TTL_ARTIFACT_DAYS` 过期；注入遥测流水按
+- **写入侧蒸馏缓冲**（配置 `MEMORY_DISTILL_MODEL` 后）：`/ingest` 的 `source`
+  为 `compaction` 或 `chat` 时落入持久化的 `distill_queue` 表——热路径零 LLM；
+  显式 `remember` / `tool` 捕获保持直存。flush 触发器（三路，仅此三路——
+  **无启动排空、无 cron**）：下次 `/ingest` 入队时 pending ≥ `MEMORY_DISTILL_BATCH`、
+  `POST /idle` 通知、`memory-mcp distill`（手动）。flush 在 daemon 线程内用
+  独立短连接 SQLite 跑（每批 ≤5 行提交，进程内单飞）；蒸馏输出按 typed facts
+  落库（`scope=global` → `project` NULL，保留 session id）；蒸馏关闭/失败/
+  不可解析 → 原文直存（`stored_raw`）——不差于蒸馏前行为；向量经 `backfill`
+  追平。**仅装适配器（shell adapters，无 v2 插件）时无 `/idle` 投递者**：
+  队列内容在批量阈值触发或手动 `memory-mcp distill` 之前不可检索——
+  按设计的有界延迟。
+- **并发契约**：服务仅有的后台工作是**蒸馏 flush 的 daemon 线程**（由 `/idle`、
+  批量阈值或 CLI 触发），每次 flush 完成后在同一线程内评估云整合触发。
+  两级都 fail-open、各自使用独立短连接、绝不在同步请求路径内跑。
+  仍然没有 cron。
+- **保留分层**：`preference` / `decision` 永久；`fact` / `artifact` 按使用度
+  存活——超过 `MEMORY_TTL_STALE_DAYS`（默认 180；NULL 按 created_at）未被召回，
+  下次 purge 时软删，被矛盾取代（superseded）的条目一并软删；注入遥测流水按
   `MEMORY_TTL_INJECTION_DAYS` 过期。
 - **`memory-mcp purge`**：硬删软删除条目 → TTL 清理 → 有实际删除才 `VACUUM`。
   同一例程在每次服务启动时运行（`MEMORY_MAINTENANCE_ON_START=1`）——
-  重启频率对天级粒度的保留策略足够；无 cron、无后台线程。
+  重启频率对天级粒度的保留策略足够。
 - **`memory-mcp backfill`**：为所有缺向量的活条目补算嵌入（装模型后的
   一次性追平）。重操作，保持手动。
 
@@ -328,21 +409,25 @@ GPU 运行期嵌入失败（如 OOM）自动 CPU 重建重试一次。无 NVIDIA
 
 ```bash
 pip install -e ".[dev]"
-pytest            # 43 项：存储/双通道召回/软删除/RRF 数学/CJK 子串/查询前缀约定/
-                  # 容错/生命周期去重与 TTL/迁移/REST 与 /api 路由/
+pytest            # 基线 43 项：存储/双通道召回/软删除/RRF 数学/CJK 子串/
+                  # 查询前缀约定/容错/生命周期去重与 TTL/迁移/REST 与 /api 路由/
                   # 批量双闸门鉴权/MCP 工具层/随机端口与服务发现/
-                  # 注入遥测（上报/聚合/TTL/鉴权）/
-                  # 排序后处理（余弦门限、遥测反哺）/
+                  # 注入遥测（上报/聚合/TTL/鉴权）/排序后处理（余弦门限、遥测反哺）/
                   # 真实模型向量端到端（MEMORY_MODEL_PATH 可选启用）
+                  # + 演进套件：蒸馏队列与 typed-fact 取代 / 重排器与共享模型槽 /
+                  # git-origin 项目键 / 使用度留存 / 云整合（mock 传输）/
+                  # 离线评测 / 召回延迟遥测与节流告警
 
 cd opencode-plugin
 npm install       # 然后：
 npm run typecheck # tsc --strict，类型基线 @opencode/plugin 2.0.28
-npm test          # 构建 + 37 项 mock-ctx 钩子断言（打真实服务；
-                  # stable 线：注入/去重/显式记忆/压缩托管/工具捕获/遥测上报/
-                  # 捕获卫生/边界标签消毒；
-                  # legacy 线：v1 钩子映射、synthetic part、compacting 重置、遥测上报；
-                  # options：env 优先、缺省补位）
+npm test          # 构建 + mock-ctx 钩子断言（打真实服务；
+                  # 基线 37 项 + 演进：次末位注入、冻结头块、按会话键控状态、
+                  #  chat 语义自动捕获、idle 通知；
+                  #  stable 线：注入/去重/显式记忆/压缩托管/工具捕获/遥测上报/
+                  #  捕获卫生/边界标签消毒；
+                  #  legacy 线：v1 钩子映射、synthetic part、compacting 重置、遥测上报；
+                  #  options：env 优先、缺省补位）
 ```
 
 插件另经真实 opencode dev 加载器（`0.0.0-dev-202610130450`）验证：双形态导出
@@ -355,8 +440,10 @@ npm test          # 构建 + 37 项 mock-ctx 钩子断言（打真实服务；
 - [x] 第三期a：多宿主适配器（`adapters/`——Claude Code、Kimi Code、Codex 模板）
 - [x] 第三期b：生命周期维护——摄取去重、TTL/purge/VACUUM、向量补嵌
       （启动钩子 + CLI，刻意不在 MCP 工具面）
-- [ ] 第三期c：chat.message 语义级自动捕获、两字中文词 bigram 通道
-      （触发条件：纯 BM25 模式出现真实漏召回）、跨项目记忆图谱、冷文件归档
+- [x] 第三期c：上下文补全演进——写入侧蒸馏、本地重排 + 共享模型槽、
+      次末位注入 + 冻结头块、云整合、使用度留存、离线评测、观测面
+- [ ] 第四期：两字中文词 bigram 通道（触发条件：纯 BM25 模式出现真实漏召回）、
+      跨项目记忆图谱、冷文件归档
 
 ## 致谢
 

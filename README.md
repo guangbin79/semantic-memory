@@ -15,8 +15,9 @@ tokens (the injection block) to buy back relevance that would otherwise be lost
 forever. Compaction makes the window fit; the sidecar makes compression safe.
 
 - MCP server (Python FastMCP): BM25 (dual-channel FTS5: porter + trigram) + vectors
-  (Qwen3-Embedding-0.6B GGUF, optional) + RRF fusion — retrieval happens in
-  embedding space, so differently-phrased memories still match
+  (Qwen3-Embedding GGUF, optional) + RRF fusion + optional local rerank —
+  retrieval happens in embedding space, so differently-phrased memories still
+  match; async distillation turns raw captures into typed facts
 - opencode v2 plugin (`opencode-plugin/memory.ts`): hooks into
   context / compaction / generate / chat.message / tool execute.after, making
   remembering and recalling automatic
@@ -27,17 +28,28 @@ forever. Compaction makes the window fit; the sidecar makes compression safe.
 
 ```
 ┌─ opencode v2 plugin (memory.ts, zero deps, fail-open) ───┐
-│  context/compaction/generate → /recall → tail injection  │
+│  context/compaction/generate → /recall → injection block │
+│    spliced just before the last user message (sub-final) │
+│    + a frozen head block of prefs/decisions per session  │
+│    byte-frozen in event.system (prefix-cache friendly)   │
+│  session.idle → POST /idle (drains the distill queue)    │
 │  pre-compaction → /ingest (discarded ≠ lost)             │
-│  chat.message "remember ..." → /ingest                   │
+│  chat.message "remember ..." / auto-capture → /ingest    │
 │  tool execute.after (whitelist) → /ingest                │
 └──────────────────────┬───────────────────────────────────┘
                        │ HTTP 127.0.0.1:8765 (optional Bearer token)
 ┌──────────────────────▼───────────────────────────────────┐
 │  memory-mcp service (single process, dual interface)     │
 │  MCP /mcp: memory_store / recall / forget / list / stats │
-│  REST sidecar: /recall /ingest /health (for plugins)     │
+│  REST sidecar: /recall /ingest /idle /health             │
 │  SQLite + FTS5(porter|trigram) + vector BLOBs, RRF(k=60) │
+│                                                          │
+│  retrieval: RRF → redundancy ceiling → local rerank      │
+│  write side: distill queue → async flush → typed facts   │
+│  cloud channel (config-gated): consolidation returning   │
+│    only a metadata ops plan — no cloud content stored    │
+│  shared model slot: embedder resident; reranker and      │
+│    distiller time-share one exclusive slot (LRU=1)       │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -45,7 +57,7 @@ The REST sidecar exists for **multi-harness support**: any agent harness with
 lifecycle hooks (Claude Code, Codex, Kimi Code, …) can wire the control plane as
 "hook event → curl localhost:8765" — only opencode v2 needs an in-process plugin,
 because its hooks live inside the JS runtime. See `adapters/` for per-harness
-integrations (planned).
+integrations — Claude Code and Kimi Code are fully adapted, Codex is a template.
 
 Design constraints: the plugin holds zero intelligence (retrieval, embedding and
 storage all live in the service); a dead service means silent skips, never a
@@ -60,8 +72,9 @@ matters is not "tokens saved" but **recall@k of task-relevant context**.
 pip install -e .                # BM25-only mode works out of the box
 pip install -e ".[embed]"       # add the vector channel (builds llama-cpp-python)
 
-# 2. (Optional) download the embedding model to enable the vector channel
-bash scripts/download_model.sh  # prints the MEMORY_MODEL_PATH export line
+# 2. (Optional) download models
+bash scripts/download_model.sh   # embedding → MEMORY_MODEL_PATH (vector channel)
+bash scripts/download_models.sh  # distiller + reranker → MEMORY_DISTILL_MODEL / MEMORY_RERANK_MODEL
 
 # 3. Start the service (HTTP mode: MCP and REST share one port)
 memory-mcp                      # http://127.0.0.1:8765/mcp
@@ -126,16 +139,34 @@ Service:
 | Variable | Default | Description |
 |---|---|---|
 | `MEMORY_DB_PATH` | `~/.local/share/memory-mcp/memory.db` | Database path |
-| `MEMORY_MODEL_PATH` | empty | GGUF model path; empty = BM25-only fallback |
+| `MEMORY_MODEL_PATH` | empty | Embedding GGUF; empty = BM25-only fallback |
 | `MEMORY_DEVICE` | `cuda` | Embed device: `cuda` (default, auto-falls back to CPU) / `cpu` |
+| `MEMORY_EMBED_DIM` | `1024` | Embedding dimension |
 | `MEMORY_HOST` / `MEMORY_PORT` | `127.0.0.1` / `8765` | Bind address; port `0` = OS-assigned random port |
 | `MEMORY_DISCOVERY_FILE` | `<db>.server.json` | Service-discovery file; `off` = disabled |
-| `MEMORY_TOKEN` | empty | REST sidecar Bearer auth; **required** when binding non-loopback |
+| `MEMORY_TOKEN` | empty | Bearer auth for REST sidecar **and** the `/mcp` endpoint; **required** when binding non-loopback |
+| `MEMORY_RECALL_LIMIT` | `5` | Default recall limit when a request omits it |
 | `MEMORY_RRF_K` | `60` | RRF fusion constant |
 | `MEMORY_RECALL_MIN_COSINE` | `0.45` | Cosine floor for vector-only hits (BM25 hits always pass); `0` = off |
+| `MEMORY_RECALL_MAX_COSINE` | `0.92` | Redundancy ceiling: vector-only hits above this drop as redundant (BM25 unaffected); `1.0` = off |
 | `MEMORY_INJECT_BOOST` | `0.15` | Telemetry feedback: score × (1 + α·ln(1+injections)); `0` = off |
+| `MEMORY_RERANK_MODEL` | empty | Reranker GGUF (**ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF only** — official conversion, community builds may lack the rank head); empty = rerank off (RRF order) |
+| `MEMORY_RERANK_CANDIDATES` | `20` | Top-N RRF candidates fed to the reranker |
+| `MEMORY_RERANK_BUDGET_MS` | `500` | Total rerank budget per recall (incl. model-slot load); exceeded = fail-open to RRF order |
+
+**Cloud channel privacy.** Configuring `MEMORY_CLOUD_BASE_URL` + `MEMORY_CLOUD_API_KEY` + `MEMORY_CLOUD_MODEL` (with `MEMORY_CLOUD_ENABLED` ≠ `0`, the default) means **memory content is sent to that endpoint** — a deterministically pre-filtered set of near-duplicate cluster members and their immediate neighborhood, never the whole store. The cloud returns only a **metadata operations plan** (`supersede`/`touch` by uid): no cloud-generated content is ever written to the store, and a plan containing anything resembling an injection pattern is dropped wholesale. The daily caps (`MEMORY_CLOUD_DAILY_MAX_CALLS` / `MEMORY_CLOUD_DAILY_MAX_TOKENS`) are in-process counters — **service restart resets them**. `MEMORY_CLOUD_ENABLED=0` is the kill switch and wins over everything.
+| `MEMORY_DISTILL_MODEL` | empty | Distiller GGUF (Qwen3-1.7B, non-thinking); empty = distill off (raw text stored on flush) |
+| `MEMORY_DISTILL_BATCH` | `20` | Flush the distill queue when pending ≥ N; `0` = disable the batch trigger |
+| `MEMORY_CLOUD_ENABLED` | `1` | Cloud-consolidation kill switch: `=0` forces off even with `MEMORY_CLOUD_*` set |
+| `MEMORY_CLOUD_BASE_URL` | empty | OpenAI-compatible `/chat/completions` endpoint; empty = cloud off |
+| `MEMORY_CLOUD_API_KEY` | empty | Cloud API key; empty = off |
+| `MEMORY_CLOUD_MODEL` | empty | Cloud model name; empty = off |
+| `MEMORY_CLOUD_BATCH_N` | `30` | Auto-trigger consolidation when candidates ≥ N |
+| `MEMORY_CLOUD_DAILY_MAX_CALLS` | `20` | Daily cloud-call hard cap; exceeded = stop until tomorrow |
+| `MEMORY_CLOUD_DAILY_MAX_TOKENS` | `200000` | Daily token (estimated) hard cap |
 | `MEMORY_TTL_ARTIFACT_DAYS` | `90` | TTL for `artifact` kind; `0` = never expire |
 | `MEMORY_TTL_INJECTION_DAYS` | `90` | TTL for injection telemetry; `0` = never expire |
+| `MEMORY_TTL_STALE_DAYS` | `180` | Usage-based retention: `fact`/`artifact` un-recalled this many days are soft-deleted at the next purge (NULL → created_at; `preference`/`decision` exempt); `0` = off |
 | `MEMORY_MAINTENANCE_ON_START` | `1` | Run the maintenance routine at service startup |
 | `MEMORY_DEDUP_SIM` | `0.98` | Cosine threshold for vector near-duplicate ingest dedup |
 
@@ -150,9 +181,12 @@ Plugin:
 | `MEMORY_PLUGIN_TOOL_CAPTURE` | empty | Tool capture whitelist (comma-separated), e.g. `gis,bash` |
 | `MEMORY_PLUGIN_AUTOSTART` | `0` | `=1` spawns the service if unreachable |
 | `MEMORY_PLUGIN_DEBUG` | `0` | `=1` logs ctx shape + resolved config |
+| `MEMORY_PLUGIN_INJECT_POSITION` | `tail` | `tail` = block spliced just before the last user message; `system` = legacy `event.system.push` fallback |
+| `MEMORY_PLUGIN_HEAD_BLOCK` | `1` | Frozen head block of preferences/decisions pushed into `event.system` once per session (byte-frozen); `=0` off |
+| `MEMORY_PLUGIN_GLOBAL_MEMORIES` | `1` | Two-path recall including global memories (`/recall` with `global_limit=2`); `=0` off |
 
 Every `MEMORY_PLUGIN_*` variable has a plugin-options twin (`url`, `token`,
-`limit`, `budget_chars`, `tool_capture`, `autostart`, `debug`), so the plugin
+`limit`, `budget_chars`, `tool_capture`, `autostart`, `debug`, `inject_position`, `head_block`, `global_memories`), so the plugin
 can also be configured right where it is declared in `opencode.json` —
 precedence: **env var > plugin options > default**:
 
@@ -261,6 +295,7 @@ hook-facing `/recall` `/ingest`, same auth rule: Bearer when `MEMORY_TOKEN` is s
 | `GET /api/memories?kind=&project=&limit=&offset=` | Paginated browse, newest-updated first |
 | `GET /api/injections?harness=&project=&limit=&offset=` | Injection telemetry, newest first |
 | `POST /inject/report` | Injection telemetry report (plugin/adapter channel, append-only) |
+| `POST /idle` | Notify idle: flush the distill queue in a daemon thread (204 immediately, auth = /ingest) |
 | `DELETE /api/memories/{uid}` | Single-entry forget (same trust level as the CLI) |
 | `POST /api/maintenance/purge` | Bulk maintenance (soft-delete purge + TTL + VACUUM) |
 | `POST /api/maintenance/backfill` | Vector backfill for vectorless entries |
@@ -311,13 +346,34 @@ recommend).
   inserting — recurrence is treated as "proven relevant again". This caps the
   growth slope of compaction-flush sources, which love re-storing near-identical
   content.
-- **Retention tiers**: `preference` / `decision` / `fact` are permanent;
-  `artifact` (tool captures) expires after `MEMORY_TTL_ARTIFACT_DAYS`;
-  injection telemetry expires after `MEMORY_TTL_INJECTION_DAYS`.
+- **Write-side distill buffer** (`MEMORY_DISTILL_MODEL` configured): `/ingest`
+  with `source` `compaction` or `chat` lands in a durable `distill_queue` table
+  — zero LLM on the hot path; explicit `remember` / `tool` captures keep storing
+  directly. Flush triggers (three, and that is the whole list — **no startup
+  drain, no cron**): queue pending ≥ `MEMORY_DISTILL_BATCH` at the next
+  `/ingest`, a `POST /idle` notification, or `memory-mcp distill`. The flush runs
+  in a daemon thread on its own short-lived SQLite connection (≤5-row commits,
+  one flush at a time per process); Distiller output is stored as typed facts
+  (`scope=global` → `project` NULL, session id preserved). Distiller off,
+  failing, or unparseable → the raw text is stored as-is (`stored_raw`) —
+  never worse than pre-distill behavior; vectors reconcile via `backfill`.
+  **Adapter-only deployments** (shell adapters, no v2 plugin) have no `/idle`
+  sender: queued content stays unsearchable until the batch threshold trips or
+  you run `memory-mcp distill` — bounded staleness, by design.
+- **Concurrency contract**: the service's only background work is the
+  **distill-flush daemon thread** (spawned by `/idle`, the batch threshold, or
+  the CLI), which after each flush evaluates the cloud-consolidation trigger in
+  the same thread. Both stages fail-open, run on their own short-lived SQLite
+  connections, and never inside a synchronous request path. Still no cron.
+- **Retention tiers**: `preference` / `decision` are permanent; `fact` /
+  `artifact` survive on use — un-recalled for `MEMORY_TTL_STALE_DAYS` (default
+  180; NULL counts from created_at) they are soft-deleted at the next purge,
+  as are entries superseded by a contradiction; injection telemetry expires
+  after `MEMORY_TTL_INJECTION_DAYS`.
 - **`memory-mcp purge`**: hard-deletes soft-deleted entries, applies the TTL,
   then `VACUUM` (only when something was actually removed). Same routine runs at
   every service start (`MEMORY_MAINTENANCE_ON_START=1`) — restart frequency is
-  enough for day-granularity retention; no cron, no background threads.
+  enough for day-granularity retention.
 - **`memory-mcp backfill`**: embeds every live entry that has no vector yet
   (one-shot reconcile after installing the model). Manual because it is heavy.
 
@@ -342,7 +398,7 @@ GPU attempt. `memory_stats` / `/health` report the actual device in use.
 ## Ranking post-processing (measured, not guessed)
 
 RRF encodes only rank, not relevance strength — "nearest among the irrelevant"
-still earns a score. Two post-fusion steps, both on by default:
+still earns a score. Post-fusion steps:
 
 - **Cosine floor** (`MEMORY_RECALL_MIN_COSINE=0.45`): vector-only hits below the
   floor are dropped; BM25 hits always pass (a token match is evidence by
@@ -351,6 +407,45 @@ still earns a score. Two post-fusion steps, both on by default:
 - **Telemetry feedback** (`MEMORY_INJECT_BOOST=0.15`): a memory that was
   actually injected before scores × (1 + α·ln(1+injections)). The log dampens
   rich-get-richer; 2 prior injections flip an adjacent rank pair.
+- **Redundancy ceiling** (`MEMORY_RECALL_MAX_COSINE=0.92`): a vector-only hit
+  whose cosine exceeds the ceiling is dropped as redundant ("too near = already
+  known"); BM25 hits pass untouched; `1.0` = off.
+- **Local rerank** (`MEMORY_RERANK_MODEL`, **off by default**): the top
+  `MEMORY_RERANK_CANDIDATES=20` RRF candidates are re-scored by
+  Qwen3-Reranker-0.6B (completions logprobs, yes/no softmax) within a hard
+  `MEMORY_RERANK_BUDGET_MS=500` budget that includes model-slot load; over
+  budget or any error → RRF order stands (fail-open). Ties break by `updated_at`
+  desc. It stays off until offline eval proves it on a real golden set (below).
+
+## Capacity & alerting (observability, not interruptions)
+
+Alerts live in service logs and the web UI badge — never injected into a
+session. `memory_stats` / `/api/stats` expose `recall_p50_ms`, `recall_p95_ms`,
+`distill_queue_len`, `cloud_calls_24h` and `entries` (latency over a rolling
+100-sample window):
+
+| Signal | Threshold | Level |
+|---|---|---|
+| recall p95 | > 800 ms | WARNING |
+| recall p95 | > 1200 ms | ERROR — past this the plugin's 1.5 s hard timeout silently drops the injection |
+| entries | > 40000 | INFO — approaching the brute-force scan ceiling (~50k) |
+
+Same-level alerts throttle to once per 10 minutes.
+
+## Offline eval (measure, then enable)
+
+```bash
+memory-mcp eval --golden FILE [--k 1,3,5] [--judge]
+```
+
+golden jsonl, one `{query, expect_uids[], project?}` per line; prints per-row
+@k hits plus a recall@k / MRR summary and a JSON report. `--judge` annotates
+misses with the Distiller (silently skipped when no distill model is
+configured). Pure CLI — never a server endpoint.
+`tests/fixtures/golden.sample.jsonl` is a 3-row format example only; the gate
+set (≥30 real queries built from your own store) decides the rerank default:
+**rerank stays off until eval shows recall@5 ≥ the RRF baseline on that real
+set.**
 
 ## Multilingual full-text search
 
@@ -369,20 +464,24 @@ channel (~15 lines, zero dependencies) — see the roadmap.
 
 ```bash
 pip install -e ".[dev]"
-pytest            # 43 tests: store / dual-channel recall / soft delete / RRF math /
-                  # CJK substring / query-prefix contract / fault tolerance /
-                  # lifecycle dedup & TTL / migration / REST & /api routes /
-                  # bulk double-gate auth / MCP tool layer /
-                  # random-port serve & service discovery /
-                  # injection telemetry (report/aggregation/TTL/auth) /
-                  # ranking post-processing (cosine floor, telemetry boost) /
-                  # real-model vector E2E (opt-in via MEMORY_MODEL_PATH)
+pytest            # baseline 43: store / dual-channel recall / soft delete /
+                  # RRF math / CJK substring / query-prefix contract / fault
+                  # tolerance / lifecycle dedup & TTL / migration / REST & /api
+                  # routes / bulk double-gate auth / MCP tool layer /
+                  # random-port serve & discovery / injection telemetry /
+                  # ranking post-processing / real-model vector E2E (opt-in)
+                  # + evolution suites: distill queue & typed-fact supersede /
+                  # reranker & shared model slot / git-origin project keys /
+                  # stale-usage retention / cloud consolidation (mock transport) /
+                  # offline eval / recall latency telemetry & throttled alerts
 
 cd opencode-plugin
 npm install       # then:
 npm run typecheck # tsc --strict against @opencode/plugin 2.0.28 types
-npm test          # build + 37 mock-ctx hook assertions against a live service
-                  # (stable line: inject/dedup/remember/compaction/tool-capture/
+npm test          # build + mock-ctx hook assertions against a live service
+                  # (baseline 37 + evolution: sub-final injection, frozen head
+                  #  block, session-keyed state, chat auto-capture, idle notify;
+                  #  stable line: inject/dedup/remember/compaction/tool-capture/
                   #  telemetry/capture-hygiene/tag-sanitizing; legacy line: v1
                   #  hook map, synthetic parts, compacting reset, telemetry;
                   #  options: env wins, gap-filling)
@@ -400,9 +499,11 @@ line, and resolves the workspace as project — no load errors.
 - [x] Phase 3a: multi-harness adapters (`adapters/` — Claude Code, Kimi Code, Codex template)
 - [x] Phase 3b: lifecycle maintenance — ingest dedup, TTL/purge/VACUUM, vector
       backfill (startup hook + CLI, deliberately off the MCP tool surface)
-- [ ] Phase 3c: semantic-level auto-capture for chat.message, bigram channel for
-      2-char CJK terms (trigger: a real recall miss in BM25-only mode),
-      cross-project memory graph, memory archive (cold file)
+- [x] Phase 3c: context-completion evolution — write-side distillation, local
+      rerank + shared model slot, sub-final injection + frozen head block,
+      cloud consolidation, usage-based retention, offline eval, observability
+- [ ] Phase 4: bigram channel for 2-char CJK terms (trigger: a real recall miss
+      in BM25-only mode), cross-project memory graph, memory archive (cold file)
 
 ## Acknowledgments
 
