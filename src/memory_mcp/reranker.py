@@ -1,13 +1,16 @@
-"""Qwen3-Reranker-0.6B 重排器：completions logprobs 判别法（spike① 方案）。
+"""Qwen3-Reranker-0.6B 重排器：采样分布行直读判别法（spike① 方案的提速实现）。
 
 官方判别模板（ggml-org/Qwen3-Reranker-0.6B-GGUF）：system 固定判决指令，
 user 携带 <Instruct>/<Query>/<Document>（文档截 512 字符），助手侧空 think
-引导；对 max_tokens=1、logprobs=20 的补全取首 token top-logprobs 中
-yes/no 两项做二类 softmax 得 0~1 相关分。logprobs 缺 yes/no、预算超时、
-任何异常 → 整体返回 None（fail-open，调用方保持 RRF 序直出）。
+引导；create_completion(max_tokens=1, 无 logprobs) 走 generate 快路径（含
+提示词前缀 KV 复用），事后按 yes/no 判别 token id 直读 scores 采样分布行，
+两类边际 softmax 得 0~1 相关分。避开 logprobs=N 后处理病灶（0.3.35 对每
+个提示词 token 做 top-K+逐项 detokenize，实测 ~270ms/候选；本路径 GPU
+实测 13ms/候选、20 候选 263ms——预算 500ms 内）。词表缺判别 token、预算
+超时、任何异常 → 整体返回 None（fail-open，调用方保持 RRF 序直出）。
 
 加载生命周期与 embedder.py 同规格：懒加载（经 ModelSlot，与 Distiller
-分时互斥）、cuda 默认 → 探针补全 → nvidia-smi PID 校验（识别静默 CPU
+分时互斥）、cuda 默认 → 探针推理 → nvidia-smi PID 校验（识别静默 CPU
 回退）→ 失败重建 CPU；运行期 GPU 推理失败（如 OOM）重建 CPU 重试一次。
 设备策略沿用 MEMORY_DEVICE（cuda 默认/cpu 可选）。
 """
@@ -26,8 +29,7 @@ from .modelslot import ModelSlot
 log = logging.getLogger("memory_mcp.reranker")
 
 MAX_DOC_CHARS: Final = 512  # 官方建议的文档截断长度（字符）
-LOGPROBS_K: Final = 20
-RERANK_N_CTX: Final = 4096  # system + instruct + query + 512 字符文档足够
+RERANK_N_CTX: Final = 1024  # system+instruct+query+512字符文档 ≯400 token；logits_all 的 scores 矩阵=n_ctx×n_vocab（1024×151936×4B≈622MB）
 DEFAULT_INSTRUCT: Final = (
     "Given a web search query, retrieve relevant passages that answer the query"
 )
@@ -36,15 +38,18 @@ SYSTEM_PROMPT: Final = (
     'the Instruct provided. Note that the answer can only be "yes" or "no"'
 )
 ASSISTANT_SUFFIX: Final = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+_YES_FORMS: Final = ("yes", " yes", "Yes", " Yes", "YES", " YES")  # 真机 F3 变体
+_NO_FORMS: Final = ("no", " no", "No", " No", "NO", " NO")
+MAX_QUERY_CHARS: Final = 256  # query 侧截断：doc 已截 512 字符，CJK 下不截可超 n_ctx=1024
 
 
 def format_prompt(instruction: str, query: str, doc: str) -> str:
-    """官方 Qwen3-Reranker 判别 prompt；文档截 MAX_DOC_CHARS 字符。"""
+    """官方 Qwen3-Reranker 判别 prompt；文档截 MAX_DOC_CHARS、query 截 MAX_QUERY_CHARS 字符。"""
     return (
         "<|im_start|>system\n"
         + SYSTEM_PROMPT
         + "<|im_end|>\n<|im_start|>user\n"
-        + f"<Instruct>: {instruction}\n<Query>: {query}\n<Document>: {doc[:MAX_DOC_CHARS]}"
+        + f"<Instruct>: {instruction}\n<Query>: {query[:MAX_QUERY_CHARS]}\n<Document>: {doc[:MAX_DOC_CHARS]}"
         + ASSISTANT_SUFFIX
     )
 
@@ -73,6 +78,8 @@ class Reranker:
         self._slot = slot if slot is not None else ModelSlot()
         self._gguf_path = Path(model_path) if model_path else None
         self._force_cpu = False       # 运行期 GPU 推理失败后置位（OOM 重建路径）
+        self._yes_ids: tuple[int, ...] | None = None  # 判别 token id，首次打分前解析
+        self._no_ids: tuple[int, ...] | None = None
         self.available = False
         if self._gguf_path is None:
             log.info("MEMORY_RERANK_MODEL 未设置，重排关闭（RRF 序直出）")
@@ -91,13 +98,13 @@ class Reranker:
             embedding=False,
             n_gpu_layers=-1 if use_gpu else 0,
             n_ctx=RERANK_N_CTX,
-            logits_all=True,  # create_completion(logprobs=N) 依赖此构造参数（0.3.35 否则必抛 ValueError）
+            logits_all=True,  # eval() 仅在 logits_all 下填充 scores（直接 logits 法依赖）
             verbose=False,
         )
 
     @staticmethod
     def _probe(model: Any) -> None:
-        model.create_completion("device probe", max_tokens=1, logprobs=1)
+        model.create_completion("device probe", max_tokens=1, temperature=0.0)
 
     def _load(self) -> Any:
         """槽加载器：GPU 尝试 → 探针补全 → nvidia-smi PID 校验 → 失败重建 CPU。"""
@@ -129,28 +136,45 @@ class Reranker:
 
     # ---------- 打分 ----------
 
-    @staticmethod
-    def _yes_no_score(resp: dict) -> float:
-        """首 token top-logprobs 中 yes/no 的二类 softmax。
+    def _resolve_ids(self, model: Any) -> None:
+        """词表内解析 yes/no 判别 token id（单 token 表面形；多 token 形剔除）。"""
+        def one_token_ids(forms: tuple[str, ...]) -> tuple[int, ...]:
+            out: set[int] = set()
+            for form in forms:
+                toks = model.tokenize(form.encode("utf-8"), add_bos=False)
+                if len(toks) == 1:
+                    out.add(int(toks[0]))
+            return tuple(out)
 
-        键做 strip/lower 归一（真机实测变体：" No"/"NO"/"No"）；无关候选的
-        一侧常整掉出 top-K（真机 F3 复现）——缺失侧钳到 floor（最小 logprob-1，
-        必低于在场侧）保序得分；两侧皆缺才是响应契约破坏，fail-open。
+        yes, no = one_token_ids(_YES_FORMS), one_token_ids(_NO_FORMS)
+        if not yes or not no:
+            raise ValueError("词表缺 yes/no 判别 token——无法打分")
+        self._yes_ids, self._no_ids = yes, no
+
+    @staticmethod
+    def _infer(model: Any, prompt: str) -> Any:
+        """快路径补全：必须走 create_completion（内部 generate 含前缀 KV 复用，
+        system+query 前缀跨候选共享）；直连 eval 无此优化且 KV 跨调用累积爆 n_ctx。"""
+        return model.create_completion(prompt, max_tokens=1, temperature=0)
+
+    def _score_from(self, model: Any, resp: Any) -> float:
+        """直读采样分布行，两类边际 softmax。
+
+        create_completion 在 max_tokens=1 的首个 yield 处挂起，生成 token 未
+        计入 n_tokens——sample() 实际读的行即 scores[n_tokens-1]（末位提示词
+        位置的下一 token 分布）。类内多表面形 exp 求和作互斥形边际，等价于
+        旧 top-logprobs 二类 softmax且免去“无关侧掉出 top-K”的钳底特判。
         """
-        try:
-            top = resp["choices"][0]["logprobs"]["top_logprobs"][0]
-        except (KeyError, IndexError, TypeError) as exc:
-            raise ValueError("completion 响应缺 top_logprobs") from exc
-        lp: dict[str, float] = {}
-        for k, v in top.items():
-            kk = k.strip().lower()
-            if kk in ("yes", "no") and kk not in lp:
-                lp[kk] = float(v)
-        if not lp:
-            raise ValueError(f"logprobs 缺 yes/no（实际键: {sorted(top)}）")
-        floor = min(float(v) for v in top.values()) - 1.0
-        exp_yes = math.exp(lp.get("yes", floor))
-        return exp_yes / (exp_yes + math.exp(lp.get("no", floor)))
+        row = model.scores[model.n_tokens - 1]
+        # 廉价自检：temperature=0 贪心 token 应是 yes/no 判别形（模型契约/行语义错位在此暴露）
+        ans = str(resp["choices"][0]["text"]).strip().lower()
+        if ans not in ("yes", "no"):
+            raise ValueError(f"采样 token {ans!r} ∉ yes/no 判别形——契约破坏或行语义错位")
+        e_yes = sum(math.exp(float(row[i])) for i in self._yes_ids)
+        e_no = sum(math.exp(float(row[i])) for i in self._no_ids)
+        if not (e_yes + e_no > 0.0):
+            raise ValueError("yes/no logits 退化")
+        return e_yes / (e_yes + e_no)
 
     def _score_all(
         self,
@@ -159,21 +183,20 @@ class Reranker:
         candidates: list[tuple[str, str]],
         deadline: float,
     ) -> list[tuple[str, float]]:
+        if self._yes_ids is None:
+            self._resolve_ids(model)  # 词表解析失败 → 下方通用 except → fail-open
         scored: list[tuple[str, float]] = []
         for uid, content in candidates:
             if time.monotonic() > deadline:  # 每次推理前检查，超时整体 fail-open
                 raise _BudgetExceeded
             try:
-                resp = model.create_completion(
-                    format_prompt(DEFAULT_INSTRUCT, query, content),
-                    max_tokens=1,
-                    logprobs=LOGPROBS_K,
-                )
+                # 仅推理纳入 GPU 重建边界：纯 Python 打分错误不应触发永久 CPU 降级
+                resp = self._infer(model, format_prompt(DEFAULT_INSTRUCT, query, content))
             except Exception as exc:
                 if self.device != "cuda":
                     raise
                 raise _GpuInferenceError(str(exc)) from exc
-            scored.append((uid, self._yes_no_score(resp)))
+            scored.append((uid, self._score_from(model, resp)))  # 行读取/softmax 出错 → 直接 fail-open
         return sorted(scored, key=lambda kv: kv[1], reverse=True)
 
     # ---------- 对外接口 ----------

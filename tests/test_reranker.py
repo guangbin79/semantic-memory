@@ -1,8 +1,7 @@
 """Reranker mock 单测：模板形状 / 排序 / fail-open / 预算守卫 / 设备回退。
 
-spike① 结论为 SKIPPED_NO_MODEL（按 FAIL 裁定默认值）：本文件全部走 mock，
-MEMORY_RERANK_* 默认保持空，真件验证顺延 F3（llama-cpp-python 本环境
-不可导入，mock 路径经类级 monkeypatch 不触发其导入）。
+直接 logits 法（2026-10-16 提速改造）：mock 提供 tokenize/eval/scores/
+n_tokens 契约；真件验证见 .omo/evidence/rerank-gate.md（GPU 实测 ~1.3ms/候选）。
 """
 import time
 from pathlib import Path
@@ -17,29 +16,48 @@ SYS_SENTENCE = (
 )
 
 
-def _lp(top: dict) -> dict:
-    return {"choices": [{"logprobs": {"top_logprobs": [top]}}]}
-
-
 class MockRerankModel:
-    """create_completion 按序弹出 scores；加载探针（无 <Document>:）固定应答。"""
+    """eval 按序弹出 (yes_logit, no_logit)；探针（无 <Document>:）固定应答。
 
-    def __init__(self, scores=None, delay=0.0, fail_docs=False):
-        self.scores = list(scores or [])
+    玩具词表：YES=1、NO=2；仅 "yes"/"no" 小写形是单 token（其余变体多 token，
+    会被 _resolve_ids 剔除）——no_judge=True 模拟词表缺判别 token。
+    """
+
+    YES, NO = 1, 2
+
+    def __init__(self, scores=None, delay=0.0, fail_docs=False, no_judge=False):
+        self.queue = list(scores or [])  # [(yes_logit, no_logit), ...]
         self.delay = delay
         self.fail_docs = fail_docs
+        self.no_judge = no_judge
         self.prompts: list[str] = []
         self.close_calls = 0
+        self.n_tokens = 0
+        self.scores: list[list[float]] = []
+        self._last_text = ""
 
-    def create_completion(self, prompt, max_tokens=1, logprobs=20, **_):
+    def tokenize(self, text, add_bos=True, special=False, **_):
+        s = text.decode("utf-8", "replace") if isinstance(text, bytes) else text
+        self._last_text = s
+        if not self.no_judge and s in ("yes", "no"):  # 判别形：单 token
+            return [self.YES if s == "yes" else self.NO]
+        return [0, 0, 0]  # 普通提示词 / 探针 / 多 token 变体
+
+    def reset(self):  # 兼容保留：当前实现不再调用
+        self.n_tokens = 0
+
+    def create_completion(self, prompt, max_tokens=1, temperature=0.0, **_):
         self.prompts.append(prompt)
         if self.delay:
             time.sleep(self.delay)
         if "<Document>:" not in prompt:  # 加载探针
-            return _lp({"yes": -0.7, "no": -0.7})
+            self.n_tokens, self.scores = 1, [[0.0, -0.7, -0.7]]
+            return {"choices": [{"text": "yes"}]}
         if self.fail_docs:
             raise RuntimeError("CUDA error: out of memory")
-        return _lp(self.scores.pop(0) if self.scores else {"yes": -0.1, "no": -3.0})
+        y, n = self.queue.pop(0) if self.queue else (-0.1, -3.0)
+        self.n_tokens, self.scores = 1, [[0.0, y, n]]  # scores[n_tokens-1] → 采样分布行
+        return {"choices": [{"text": "yes" if y > n else "no"}]}
 
     def close(self):
         self.close_calls += 1
@@ -59,7 +77,7 @@ def make_reranker(monkeypatch, gguf, mock, device="cpu", budget_ms=500) -> Reran
 
 def test_prompt_template_official_shape(monkeypatch, gguf):
     """官方判别模板：system 句 / Instruct-Query-Document / 空 think 后缀 / 512 截断。"""
-    mock = MockRerankModel(scores=[{"yes": -0.1, "no": -3.0}])
+    mock = MockRerankModel(scores=[(-0.1, -3.0)])
     rr = make_reranker(monkeypatch, gguf, mock)
     long_doc = "A" * 600 + "TAIL"
     result = rr.rerank("部署用哪个分支", [("u1", long_doc)])
@@ -85,10 +103,10 @@ def test_format_prompt_short_doc_untouched():
     )
 
 
-def test_rerank_order_by_yes_logprob(monkeypatch, gguf):
+def test_rerank_order_by_yes_logit(monkeypatch, gguf):
     mock = MockRerankModel(scores=[
-        {"no": -0.1, "yes": -3.0},   # 候选顺序在前，相关分低
-        {"no": -3.0, "yes": -0.1},   # 相关候选应被排到第一
+        (-3.0, -0.1),   # 候选顺序在前，相关分低
+        (-0.1, -3.0),   # 相关候选应被排到第一
     ])
     rr = make_reranker(monkeypatch, gguf, mock)
     result = rr.rerank("部署用哪个分支",
@@ -99,24 +117,21 @@ def test_rerank_order_by_yes_logprob(monkeypatch, gguf):
     assert 0.0 < result[1][1] < 0.1
 
 
-@pytest.mark.parametrize("top", [
-    {"maybe": -0.1, "nope": -2.0},  # 两侧皆缺：响应契约破坏，fail-open
-])
-def test_missing_logprobs_fail_open(monkeypatch, gguf, top):
-    mock = MockRerankModel(scores=[top])
+def test_vocab_missing_judge_tokens_fail_open(monkeypatch, gguf):
+    """词表无 yes/no 判别 token → 解析失败 → fail-open（旧"两侧皆缺"等价场景）。"""
+    mock = MockRerankModel(no_judge=True)
     rr = make_reranker(monkeypatch, gguf, mock)
     assert rr.rerank("q", [("u1", "doc")]) is None
 
 
-def test_missing_side_clamped_orders_by_present_side(monkeypatch, gguf):
-    """真机 F3：无关候选的一侧常整掉出 top-K——缺失侧钳底保序，不 fail-open。"""
-    mock = MockRerankModel(scores=[{"yes": -0.1}, {"no": -0.1}])
+def test_one_side_dominant_orders_by_present_side(monkeypatch, gguf):
+    """一侧压倒性在场（另一侧 logits 极低）→ 边际 softmax 自然保序，不 fail-open。"""
+    mock = MockRerankModel(scores=[(-0.1, -30.0), (-30.0, -0.1)])
     rr = make_reranker(monkeypatch, gguf, mock)
     result = rr.rerank("q", [("u_yes", "doc rel"), ("u_no", "doc irr")])
     assert result is not None
     scores = dict(result)
     assert scores["u_yes"] > 0.5 > scores["u_no"]  # 在场侧占优
-
 
 
 def test_budget_timeout_returns_none(monkeypatch, gguf):
@@ -143,7 +158,7 @@ def test_gpu_init_fallback_pid_check(monkeypatch, gguf):
     """加载链：GPU 探针通过但 nvidia-smi 无 pid → 判静默回退 → CPU 重建。"""
     import memory_mcp.reranker as mod
 
-    mock = MockRerankModel(scores=[{"yes": -0.1, "no": -3.0}])
+    mock = MockRerankModel(scores=[(-0.1, -3.0)])
     monkeypatch.setattr(Reranker, "_new_model", lambda self, use_gpu: mock)
     monkeypatch.setattr(mod, "_pid_vram_on_gpu", lambda pid: None)
     rr = Reranker(gguf, device="cuda")
@@ -157,7 +172,7 @@ def test_gpu_oom_rebuilds_cpu_and_retries_once(monkeypatch, gguf):
     import memory_mcp.reranker as mod
 
     gpu_mock = MockRerankModel(fail_docs=True)
-    cpu_mock = MockRerankModel(scores=[{"yes": -0.1, "no": -3.0}])
+    cpu_mock = MockRerankModel(scores=[(-0.1, -3.0)])
     monkeypatch.setattr(
         Reranker, "_new_model",
         lambda self, use_gpu: gpu_mock if use_gpu else cpu_mock,
@@ -178,7 +193,7 @@ def test_modelslot_shared_with_distiller_kind(monkeypatch, gguf):
     from memory_mcp.modelslot import ModelSlot
 
     slot = ModelSlot()
-    mock = MockRerankModel(scores=[{"yes": -0.1, "no": -3.0}])
+    mock = MockRerankModel(scores=[(-0.1, -3.0)])
     rr = make_reranker(monkeypatch, gguf, mock)
     rr._slot = slot
     distill = MockRerankModel()
