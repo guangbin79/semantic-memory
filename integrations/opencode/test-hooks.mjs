@@ -14,7 +14,11 @@
  *   5. tool execute.after 白名单捕获 artifact，error 状态不捕获；
  *   6. task11：头块 top2 / 负例（fact、跨项目不进头块）/ 首钩无用户文本推迟 /
  *      INJECT_POSITION=system 回退；
- *   7. adapters：claude-code/kimi-code on-prompt.sh 的 remember 分支发 source=remember。
+ *   7. adapters：claude-code/kimi-code on-prompt.sh 的 remember 分支发 source=remember；
+ *   8. A4：stable 线 ctx.tool.transform 注册恰 2 个原生工具（memory_store/memory_recall，
+ *      input 为 JSON Schema）；store→POST /ingest（body.source=remember、project 用 stable
+ *      线变量、input.text→body.content）；recall→POST /recall（query/limit 透传）；
+ *      fetch reject→返回 "memory service unreachable" 错误串绝不 throw（独立 10s 超时面）。
  *
  * 运行：MEMORY_PLUGIN_URL=http://127.0.0.1:8766 MEMORY_PLUGIN_TOOL_CAPTURE=bash \
  *       MEMORY_DB_PATH=/tmp/xxx.db node test-hooks.mjs
@@ -48,6 +52,7 @@ function eventChannel() {
 function makeCtx() {
   const session = new Map(); // name -> [cb]
   const tool = new Map();
+  const toolDefs = []; // A4：ctx.tool.transform 注册的原生工具捕获
   const channel = eventChannel();
   const register = (map) => async (name, cb) => {
     if (!map.has(name)) map.set(name, []);
@@ -56,6 +61,7 @@ function makeCtx() {
   };
   return {
     hooks: { session, tool },
+    toolDefs,
     channel,
     ctx: {
       location: {
@@ -63,7 +69,13 @@ function makeCtx() {
         project: { id: "p1", directory: PROJECT, canonical: PROJECT },
       },
       session: { hook: register(session) },
-      tool: { hook: register(tool) },
+      tool: {
+        hook: register(tool),
+        transform: async (cb) => {
+          cb({ add: (t) => toolDefs.push(t) });
+          return { dispose: async () => {} };
+        },
+      },
       event: { subscribe: () => channel },
     },
   };
@@ -112,7 +124,7 @@ async function waitInjection(project, hook, timeoutMs = 3000) {
 
 // ---------- 测试 ----------
 
-const { hooks, ctx, channel } = makeCtx();
+const { hooks, ctx, channel, toolDefs } = makeCtx();
 await plugin.setup(ctx);
 
 // 钩子注册完整性（约束 3：三个注入钩子都必须注册）
@@ -464,6 +476,60 @@ const dashLines = (oout.parts[1].text.match(/^- /gm) ?? []).length;
 assert.equal(dashLines, 1, "options limit:1 应只注入一条（两条候选命中）");
 console.log("ok  插件 options: env 优先于 options，options 补空缺（limit=1 生效）");
 
+// ---------- A4：stable 线原生工具 memory_store / memory_recall（fetch mock 验证转发契约） ----------
+
+assert.equal(toolDefs.length, 2, `原生工具应恰注册 2 个（实际 ${toolDefs.length}）`);
+const storeTool = toolDefs.find((t) => t.name === "memory_store");
+const recallTool = toolDefs.find((t) => t.name === "memory_recall");
+assert.ok(storeTool && recallTool, "工具名应为 memory_store / memory_recall");
+for (const t of toolDefs) {
+  assert.equal(t.input.type, "object", `${t.name} input 应为 JSON Schema object`);
+  assert.ok(t.input.properties && !Array.isArray(t.input.properties), `${t.name} input.properties 应为对象`);
+  assert.ok(Array.isArray(t.input.required) && t.input.required.length > 0, `${t.name} input.required 应为非空数组`);
+  assert.equal(typeof t.description, "string", `${t.name} 应有 description`);
+}
+assert.ok(storeTool.input.required.includes("text"), "store input 应必填 text");
+assert.deepEqual(storeTool.input.properties.kind.enum, ["preference", "decision", "fact"], "kind 枚举应为三档");
+assert.ok(recallTool.input.required.includes("query"), "recall input 应必填 query");
+console.log("ok  原生工具注册: 恰 2 个（memory_store/memory_recall），input 均为 JSON Schema");
+
+// fetch mock：验证转发契约（store 的 /ingest body.source=remember + stable 线 project；recall 透传 query/limit）
+const realFetch = globalThis.fetch;
+const fetched = [];
+globalThis.fetch = async (url, init) => {
+  fetched.push({ url: String(url), body: JSON.parse(init?.body ?? "{}") });
+  return new Response(JSON.stringify({ hits: [], uid: "u1" }), { status: 200, headers: { "content-type": "application/json" } });
+};
+try {
+  const toolCtx = { signal: new AbortController().signal, progress: async () => {} };
+  const sres = await storeTool.execute({ text: "原生工具 store 验证", kind: "decision", tags: ["native"] }, toolCtx);
+  assert.equal(typeof sres.content, "string", "store 结果应为字符串 content");
+  const ing = fetched.find((f) => f.url === `${BASE}/ingest`);
+  assert.ok(ing, "memory_store 应 POST {url}/ingest");
+  assert.equal(ing.body.source, "remember", "store 的 /ingest body.source 应为 remember");
+  assert.equal(ing.body.content, "原生工具 store 验证", "工具 input.text 应映射到 /ingest body.content");
+  assert.equal(ing.body.kind, "decision");
+  assert.equal(ing.body.project, PROJECT, "store 应携带 stable 线 project 变量");
+  assert.deepEqual(ing.body.tags, ["native"]);
+
+  await recallTool.execute({ query: "部署分支", limit: 3 }, toolCtx);
+  const rec = fetched.find((f) => f.url === `${BASE}/recall`);
+  assert.ok(rec, "memory_recall 应 POST {url}/recall");
+  assert.equal(rec.body.query, "部署分支");
+  assert.equal(rec.body.limit, 3);
+  console.log("ok  工具转发: store→/ingest(source=remember,project) 且 input.text→body.content；recall→/recall(query/limit)");
+
+  // fetch reject → 返回 "memory service unreachable" 错误串，绝不 throw（fail-open）
+  globalThis.fetch = async () => { throw new TypeError("fetch failed"); };
+  const dres = await storeTool.execute({ text: "x" }, toolCtx);
+  assert.equal(dres.content, "memory service unreachable", "store 服务不可达应返回错误串");
+  const dres2 = await recallTool.execute({ query: "x" }, toolCtx);
+  assert.equal(dres2.content, "memory service unreachable", "recall 服务不可达应返回错误串");
+  console.log("ok  fail-open: fetch reject 返回 memory service unreachable 错误串，不 throw");
+} finally {
+  globalThis.fetch = realFetch;
+}
+
 // ---------- adapters：显式 remember 分支发 source=remember（grep 逐文件验证） ----------
 
 for (const f of ["../claude-code/on-prompt.sh", "../kimi-code/on-prompt.sh"]) {
@@ -475,4 +541,4 @@ for (const f of ["../claude-code/on-prompt.sh", "../kimi-code/on-prompt.sh"]) {
 }
 console.log("ok  适配器: claude-code/kimi-code on-prompt.sh remember 分支均发 source=remember");
 
-console.log("\n全部 mock-ctx 钩子集成测试通过（stable + legacy 两线 + task11 头块/位置/键控 + options + task7 写入侧/idle）");
+console.log("\n全部 mock-ctx 钩子集成测试通过（stable + legacy 两线 + task11 头块/位置/键控 + options + task7 写入侧/idle + A4 原生工具）");

@@ -13,7 +13,8 @@
  *   MEMORY_PLUGIN_BUDGET_CHARS  budget_chars  注入块字符预算，默认 2000（≈500 tokens）
  *   MEMORY_PLUGIN_TOOL_CAPTURE  tool_capture  tool execute.after 捕获白名单
  *                                            （数组或逗号分隔，默认空=关闭）
- *   MEMORY_PLUGIN_AUTOSTART     autostart     =1/true 时服务未启动则尝试 spawn `memory-mcp`
+ *   MEMORY_PLUGIN_AUTOSTART     autostart     =1/true 时服务未启动则按 D9 阶梯 spawn：
+ *                                            `semantic-memory` → `python3 -m semantic_memory` → 再败静默
  *   MEMORY_PLUGIN_DEBUG         debug         =1/true 打印 ctx 形态与解析后配置
  *   MEMORY_PLUGIN_INJECT_POSITION inject_position 注入位置：tail（默认，次末位）/ system（旧行为回退）
  *   MEMORY_PLUGIN_HEAD_BLOCK     head_block     冻结头块开关，默认开（仅 =0 关闭）
@@ -21,6 +22,14 @@
  * 插件 options 写法（opencode.json 元组声明，dev 运行时实测透传）：
  *   "plugin": [["file:///path/to/opencode-plugin", {"url": "http://127.0.0.1:9000", "limit": 8}]]
  * stable 运行时（@opencode/plugin 2.x）则从 ctx.options 读取同一张表。
+ *
+ * 原生工具（stable 线，A4）：ctx.tool.transform 注册两个记忆工具，
+ *   memory_store  — 存记忆。input：text 必填，kind 可选 preference|decision|fact，
+ *                   tags 可选；→ POST /ingest {content,kind,source:"remember",project}。
+ *   memory_recall — 检索记忆。input：query 必填，limit 可选；→ POST /recall {query,limit}。
+ * 工具转发走独立 10s 超时（不与 hooks 的 1.5s 共用——工具调用值得等模型/DB），
+ * 服务不可达返回 "memory service unreachable" 错误串、绝不 throw（fail-open）。
+ * dev/legacy 线无 tool.transform 面，不注册（见 control() 稳定线判定）。
  *
  * 设计约束（勿破坏）：
  * 1. 插件零智能——检索/嵌入/存储全在服务端，这里只做转发与降级；
@@ -105,6 +114,8 @@ function applyOptions(o: Record<string, unknown> | undefined): void {
 }
 
 const TIMEOUT_MS = 1500;
+// 工具转发独立超时（A4）：工具调用可等模型/DB，不与 hooks 的 1.5s 抢跑道
+const TOOL_TIMEOUT_MS = 10_000;
 
 // ---------- 服务通信（全部 fail-open） ----------
 
@@ -125,6 +136,27 @@ async function post(path: string, body: unknown): Promise<any | null> {
     return null; // 服务未启动 / 超时 / 网络异常：静默降级
   }
 }
+/**
+ * 工具转发（与 hooks 的 post 分离，A4）：10s 独立超时；任何失败都返回错误串
+ * 绝不 throw——工具面 fail-open：结果可降级，会话不可阻断。
+ */
+async function postTool(path: string, body: unknown): Promise<string> {
+  try {
+    const res = await fetch(`${cfg.url}${path}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(cfg.token ? { authorization: `Bearer ${cfg.token}` } : {}),
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(TOOL_TIMEOUT_MS),
+    });
+    if (!res.ok) return `memory service error (HTTP ${res.status})`;
+    return JSON.stringify(await res.json());
+  } catch {
+    return "memory service unreachable"; // 服务未启动 / 超时 / 网络异常：错误串降级
+  }
+}
 
 let serviceChecked = false;
 async function ensureService(): Promise<boolean> {
@@ -138,7 +170,19 @@ async function ensureService(): Promise<boolean> {
   if (!serviceChecked && cfg.autostart) {
     try {
       const { spawn } = await import("node:child_process");
-      spawn("memory-mcp", [], { detached: true, stdio: "ignore" }).unref();
+      // D9 阶梯：semantic-memory 入口 → python3 -m semantic_memory → 再败静默（一行 debug）。
+      // spawn 失败经异步 error 事件步降（ENOENT 不会同步 throw）。
+      const trySpawn = (cmd: string, args: string[], next?: () => void): void => {
+        try {
+          spawn(cmd, args, { detached: true, stdio: "ignore" })
+            .on("error", () => {
+              if (next) next();
+              else if (cfg.debug) console.error(`[memory] autostart 两级均败（${cmd} ${args.join(" ")}），静默跳过`);
+            })
+            .unref();
+        } catch { /* spawn 能力异常：静默 */ }
+      };
+      trySpawn("semantic-memory", [], () => trySpawn("python3", ["-m", "semantic_memory"]));
       // 给模型/DB 一点启动时间，下一轮钩子自然会连上
     } catch { /* 忽略 */ }
   }
@@ -517,6 +561,54 @@ async function control(ctx: StableCtx, options?: Record<string, unknown>): Promi
           : JSON.stringify(event.result?.output ?? content ?? "");
         await captureTool(event.tool, raw, project, event.sessionID);
       });
+
+      /**
+       * 原生记忆工具（A4/D9，仅 stable 线——dev/legacy 线无 tool.transform 面，跳过）。
+       * input 为纯 JSON Schema；转发走 postTool 独立 10s 超时；服务不可达返回
+       * "memory service unreachable" 错误串、绝不 throw（工具面 fail-open）。
+       */
+      if (typeof ctx.tool?.transform === "function") {
+        await ctx.tool.transform((editor) => {
+          editor.add({
+            name: "memory_store",
+            description:
+              "存一条长期记忆（默认 fact；偏好/决策建议显式指定 kind）。服务不可达时返回错误串，不影响会话。",
+            input: {
+              type: "object",
+              properties: {
+                text: { type: "string", description: "要记住的内容" },
+                kind: { type: "string", enum: ["preference", "decision", "fact"], description: "记忆类型，默认 fact" },
+                tags: { type: "array", items: { type: "string" }, description: "标签（可选）" },
+              },
+              required: ["text"],
+            },
+            execute: async (input: any) => ({
+              content: await postTool("/ingest", {
+                content: input.text,
+                kind: input.kind,
+                source: "remember", // 直存，不入蒸馏队列
+                project,
+                tags: input.tags,
+              }),
+            }),
+          });
+          editor.add({
+            name: "memory_recall",
+            description: "检索跨会话记忆（BM25+向量混合）。不传 project 搜全局。",
+            input: {
+              type: "object",
+              properties: {
+                query: { type: "string", description: "检索查询" },
+                limit: { type: "number", description: "返回条数（缺省服务端 5）" },
+              },
+              required: ["query"],
+            },
+            execute: async (input: any) => ({
+              content: await postTool("/recall", { query: input.query, limit: input.limit }),
+            }),
+          });
+        });
+      }
       return subscribeIdle(c);
     }
 
