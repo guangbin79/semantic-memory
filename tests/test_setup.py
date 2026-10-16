@@ -8,7 +8,9 @@ from types import SimpleNamespace
 
 import pytest
 
-httpx2 = pytest.importorskip("httpx2")  # setup 下载通道测试需 HTTP 客户端（mock transport）
+import importlib.util
+_MOD = "httpx2" if importlib.util.find_spec("httpx2") else "httpx"  # 镜像 cloud.py 回退链
+httpx2 = pytest.importorskip(_MOD)  # setup 下载通道测试需 HTTP 客户端（mock transport）
 
 from semantic_memory import setup as setup_mod
 from semantic_memory.setup import ModelSpec, _download_verified, run_setup

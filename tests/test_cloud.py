@@ -5,7 +5,9 @@ import time
 
 import pytest
 
-httpx2 = pytest.importorskip("httpx2")  # 云通道测试需 HTTP 客户端
+import importlib.util
+_MOD = "httpx2" if importlib.util.find_spec("httpx2") else "httpx"  # 镜像 cloud.py 回退链
+httpx2 = pytest.importorskip(_MOD)  # 云通道测试需 HTTP 客户端
 np = pytest.importorskip("numpy")  # 零依赖基座：无 numpy 时整模块跳过
 
 from semantic_memory.cloud import INJECTION_RE, Consolidator
