@@ -4,12 +4,27 @@
    本机若存在该文件，单测会意外加载真模型（慢 + GPU 依赖）。全套件强制
    MEMORY_RERANK_MODEL=空 = 关闭；需要真件的测试自行覆盖（真件路径按
    opt-in 惯例走环境显式指定）。
-2. 进程内 REST 测试服：ThreadingHTTPServer(port 0) + http.client 薄封装。
+2. 数据目录隔离（防开发机真 config/数据泄入，也防迁移逻辑碰真旧目录）：
+   MEMORY_DATA_DIR 与 XDG_DATA_HOME 钉到临时目录；测试 tier 语义时自行
+   monkeypatch 覆盖。
+3. 进程内 REST 测试服：ThreadingHTTPServer(port 0) + http.client 薄封装。
    注意：server 模块单例（cfg/store）由首个导入它的测试模块按其 env 建库，
    全测试共享同一单例（与历史行为一致）；故 fixture 为 session
    级且懒导入 server。
 """
 import http.client
+import json
+import os
+import tempfile
+import threading
+from urllib.parse import urlencode
+
+import pytest
+
+os.environ.setdefault("MEMORY_RERANK_MODEL", "")  # 未设→关闭保封闭性（防真模型意外加载）；显式指定→保留 opt-in
+_ISOLATION = tempfile.mkdtemp(prefix="mcp-test-isolation-")  # 会话级隔离根（tmp 自身会回收）
+os.environ["MEMORY_DATA_DIR"] = os.path.join(_ISOLATION, "data")   # 新数据目录（含 config.toml 落点）
+os.environ["XDG_DATA_HOME"] = os.path.join(_ISOLATION, "xdg")      # 旧默认目录同链隔离（迁移测试安全）
 import json
 import os
 import threading

@@ -48,6 +48,7 @@ from .lifecycle import (
 )
 from .project import backfill_project_keys, resolve_project
 from .modelslot import ModelSlot
+from .paths import MigrationRefused, migrate_legacy
 from .reranker import Reranker
 
 log = logging.getLogger("semantic_memory")
@@ -110,6 +111,10 @@ def _record_recall(ms: float) -> None:
         _alert_last[lv] = now
         log.log(_LEVELS[lv], "recall alert: %s", msg)
 
+try:  # 旧目录自动迁移（D3）：仅模块导入时一次，禁入热路径；拒迁不阻塞启动
+    migrate_legacy()
+except MigrationRefused as e:
+    log.error("legacy migration skipped: %s", e)
 cfg = Config.from_env()
 store = MemoryStore(cfg.db_path)
 embedder = Embedder(cfg.model_path, dim=cfg.embed_dim, device=cfg.device)

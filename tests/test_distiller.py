@@ -205,6 +205,8 @@ def test_config_rerank_model_default(monkeypatch, tmp_path):
     """三态语义：未设→常规 XDG 路径；显式空→关闭；空白填充→取值与判空一致。"""
     from semantic_memory.config import Config
 
+    monkeypatch.delenv("MEMORY_DATA_DIR", raising=False)  # conftest 隔离值不参与 tier 判定
+
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
     monkeypatch.delenv("MEMORY_RERANK_MODEL", raising=False)
     assert Config.from_env().rerank_model == (
