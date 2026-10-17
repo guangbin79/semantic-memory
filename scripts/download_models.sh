@@ -10,6 +10,12 @@
 #   download_models.sh --audit  README env 表 vs 代码默认值逐一比对，不一致退出非零
 set -euo pipefail
 
+# 缺 sha256sum 直接快败：否则缺工具会被当作校验失败误删/误拒（macOS 裸机无 coreutils）
+command -v sha256sum >/dev/null 2>&1 || {
+  echo "缺少 sha256sum——macOS 可 brew install coreutils，或改用 semantic-memory setup" >&2
+  exit 1
+}
+
 # 模型目录随数据目录三档解析（与 paths.py 同语义，v0.3 起默认 ~/semantic-memory）
 if [ -n "${MEMORY_DATA_DIR:-}" ]; then
   MODEL_DIR="${MEMORY_DATA_DIR/#\~/$HOME}/models"
@@ -50,24 +56,36 @@ if [ "${1:-}" = "--audit" ]; then
   exec python3 "$(cd "$(dirname "$0")" && pwd)/check_docs_env.py"
 fi
 
-verify() {  # $1=file $2=sha —— 校验失败删件退出（供应链防护）
-  local file="$1" sha="$2"
-  if ! echo "$sha  $MODEL_DIR/$file" | sha256sum -c --status -; then
-    rm -f "$MODEL_DIR/$file"
-    echo "sha256 校验失败：已删除 $file——请重试或改用 semantic-memory setup（校验/断点续传更完备）" >&2
-    exit 1
+verify() {  # $1=路径 $2=sha —— 摘要比对（不用 -c --status：非零退出混入不可读/缺工具等非匹配失败）
+  local path="$1" sha="$2" sum=""
+  sum=$(sha256sum "$path" 2>/dev/null | cut -d' ' -f1) || sum=""
+  if [ "$sum" != "$sha" ]; then
+    return 1
   fi
+}
+
+refuse() {  # $1=file $2=信息 —— 既存件不符：只拒用不删（用户数据不被脚本销毁）
+  echo "$2" >&2
+  echo "已存在但 sha256 不符：$MODEL_DIR/$1（损坏/被替换/换量化）——请确认后手动删除重下" >&2
+  exit 1
 }
 
 download() {
   local file="$1" url="$2" sha="$3"
   if [ -f "$MODEL_DIR/$file" ]; then
-    verify "$file" "$sha"   # 既存也验：损坏/被替换的模型不静默投入使用
+    verify "$MODEL_DIR/$file" "$sha" \
+      || refuse "$file" "既存件校验失败——不自动删除，交用户裁量"
     echo "已存在: $MODEL_DIR/$file"
   else
     echo "下载 $file ..."
-    curl -fSL --progress-bar "$url" -o "$MODEL_DIR/$file"
-    verify "$file" "$sha"
+    # 直落 .part 再原子改名：断传残件不冒充既存件（与 setup.py 同构）
+    curl -fSL --progress-bar "$url" -o "$MODEL_DIR/$file.part"
+    if ! verify "$MODEL_DIR/$file.part" "$sha"; then
+      rm -f "$MODEL_DIR/$file.part"
+      echo "sha256 校验失败：已删除 $file.part（供应链防护）——请重试或改用 semantic-memory setup" >&2
+      exit 1
+    fi
+    mv -f "$MODEL_DIR/$file.part" "$MODEL_DIR/$file"
   fi
 }
 

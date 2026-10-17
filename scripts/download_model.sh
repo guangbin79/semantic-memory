@@ -2,6 +2,12 @@
 # 下载 Qwen3-Embedding-0.6B GGUF（约 0.6GB，Q8_0）
 set -euo pipefail
 
+# 缺 sha256sum 直接快败：否则缺工具会被当作校验失败误删/误拒（macOS 裸机无 coreutils）
+command -v sha256sum >/dev/null 2>&1 || {
+  echo "缺少 sha256sum——macOS 可 brew install coreutils，或改用 semantic-memory setup" >&2
+  exit 1
+}
+
 # 模型目录随数据目录三档解析（与 paths.py / download_models.sh 同语义）
 if [ -n "${MEMORY_DATA_DIR:-}" ]; then
   MODEL_DIR="${MEMORY_DATA_DIR/#\~/$HOME}/models"
@@ -20,23 +26,32 @@ mkdir -p "$MODEL_DIR"
 
 FILE="Qwen3-Embedding-0.6B-Q8_0.gguf"
 URL="https://huggingface.co/Qwen/Qwen3-Embedding-0.6B-GGUF/resolve/main/${FILE}"
-# 与 setup.py 固定常量表同源（2026-10-17 硬化：手动路径补供应链钉验）
+# 与 setup.py 固定常量表同源（锚测试见 tests/test_hardening.py，漂移即红）
 SHA256="06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439"
 
+verify() {  # $1=路径 $2=sha —— 摘要比对（不用 -c --status：非零退出混入不可读/缺工具等非匹配失败）
+  local path="$1" sha="$2" sum=""
+  sum=$(sha256sum "$path" 2>/dev/null | cut -d' ' -f1) || sum=""
+  [ "$sum" = "$sha" ]
+}
+
 if [ -f "$MODEL_DIR/$FILE" ]; then
-  if ! echo "$SHA256  $MODEL_DIR/$FILE" | sha256sum -c --status -; then
-    echo "已存在但 sha256 不符：$MODEL_DIR/$FILE（损坏或被替换）——请删除后重下" >&2
+  # 既存件不符只拒用不删：用户数据不被脚本销毁（换量化/新版本交用户裁量）
+  if ! verify "$MODEL_DIR/$FILE" "$SHA256"; then
+    echo "已存在但 sha256 不符：$MODEL_DIR/$FILE（损坏/被替换/换量化）——请确认后手动删除重下" >&2
     exit 1
   fi
   echo "已存在: $MODEL_DIR/$FILE"
 else
   echo "下载 $FILE ..."
-  curl -fSL --progress-bar "$URL" -o "$MODEL_DIR/$FILE"
-  if ! echo "$SHA256  $MODEL_DIR/$FILE" | sha256sum -c --status -; then
-    rm -f "$MODEL_DIR/$FILE"
-    echo "sha256 校验失败：已删除 $FILE（供应链防护）——请重试或改用 semantic-memory setup" >&2
+  # 直落 .part 再原子改名：断传残件不冒充既存件（与 setup.py 同构）
+  curl -fSL --progress-bar "$URL" -o "$MODEL_DIR/$FILE.part"
+  if ! verify "$MODEL_DIR/$FILE.part" "$SHA256"; then
+    rm -f "$MODEL_DIR/$FILE.part"
+    echo "sha256 校验失败：已删除 $FILE.part（供应链防护）——请重试或改用 semantic-memory setup" >&2
     exit 1
   fi
+  mv -f "$MODEL_DIR/$FILE.part" "$MODEL_DIR/$FILE"
 fi
 
 cat <<EOF

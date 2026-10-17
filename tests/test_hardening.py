@@ -90,3 +90,24 @@ def test_ingest_bad_or_null_source(client):
     assert r.status_code == 400 and "error" in r.json()
     r2 = client.post("/ingest", json={"content": "硬化验证 nullsrc 正常体", "source": None, "kind": "fact"})
     assert r2.status_code == 200 and r2.json().get("queued") is True  # null→chat 走入队路径
+
+
+def test_download_script_sha_constants_match_setup():
+    """手动下载脚本的三处 sha256 常量与 setup.py MODELS 表逐字节一致（漂移即红）。"""
+    import re
+    from pathlib import Path
+
+    from semantic_memory.setup import MODELS
+
+    root = Path(__file__).resolve().parent.parent
+    one = (root / "scripts" / "download_model.sh").read_text(encoding="utf-8")
+    two = (root / "scripts" / "download_models.sh").read_text(encoding="utf-8")
+
+    def sha_of(text: str, name: str) -> str:
+        m = re.search(rf'^{name}="([0-9a-f]{{64}})"', text, re.M)
+        assert m, f"常量 {name} 未在脚本中找到"
+        return m.group(1)
+
+    assert sha_of(one, "SHA256") == MODELS["embed"].sha256
+    assert sha_of(two, "DISTILL_SHA") == MODELS["distill"].sha256
+    assert sha_of(two, "RERANK_SHA") == MODELS["rerank"].sha256
