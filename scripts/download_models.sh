@@ -12,11 +12,17 @@ set -euo pipefail
 
 # 模型目录随数据目录三档解析（与 paths.py 同语义，v0.3 起默认 ~/semantic-memory）
 if [ -n "${MEMORY_DATA_DIR:-}" ]; then
-  MODEL_DIR="$MEMORY_DATA_DIR/models"
+  MODEL_DIR="${MEMORY_DATA_DIR/#\~/$HOME}/models"
 elif [ -n "${XDG_DATA_HOME:-}" ]; then
-  MODEL_DIR="$XDG_DATA_HOME/memory-mcp/models"
+  MODEL_DIR="${XDG_DATA_HOME/#\~/$HOME}/memory-mcp/models"
 else
   MODEL_DIR="$HOME/semantic-memory/models"
+  # 旧家目录未迁移时先起一次服务（自动迁移），否则本次下载会把新家灌非空、迁移被护栏跳过
+  for legacy in "$HOME/.local/share/memory-mcp" "$HOME/semantic-memory-mcp"; do
+    if [ -d "$legacy" ] && [ ! -f "$legacy/MIGRATED" ]; then
+      echo "警告：检测到未迁移的旧家目录 $legacy——建议先运行服务完成自动迁移再下载模型（忽略则旧数据迁移将被跳过）" >&2
+    fi
+  done
 fi
 mkdir -p "$MODEL_DIR"
 

@@ -28,6 +28,7 @@ log = logging.getLogger(__name__)
 
 MIGRATED_MARKER = "MIGRATED"
 _LOCK_NAME = ".migrate.lock"
+_VENV_NAME = "venv"  # bootstrap 工具态：一键安装的 venv 不是用户数据，两边都忽略
 _DISCOVERY_GLOB = "*.server.json"
 
 
@@ -84,8 +85,19 @@ def migrate_legacy() -> bool:
     """
     data_dir = resolve_data_dir()
     moved = False
+    fatal: MigrationError | None = None
     for legacy in legacy_data_dirs():
-        moved = _migrate_one(data_dir, legacy) or moved
+        try:
+            moved = _migrate_one(data_dir, legacy) or moved
+        except MigrationRefused as e:
+            # 拒迁是单目录事实（活实例/并发锁），不得阻塞其余旧目录——记日志继续
+            log.warning("legacy migration refused (%s): %s", legacy, e)
+        except MigrationError as e:
+            # 校验失败等致命伤：本目录数据保持双份/原样，先让其余目录迁完再统一上抛
+            log.error("legacy migration failed (%s): %s", legacy, e)
+            fatal = fatal or e
+    if fatal is not None:
+        raise fatal
     return moved
 
 
@@ -111,7 +123,8 @@ def _migrate_one(data_dir: Path, legacy: Path) -> bool:
         _wal_checkpoint_all(legacy)
         data_dir.mkdir(parents=True, exist_ok=True)
         for entry in sorted(legacy.iterdir()):
-            if entry.name in (_LOCK_NAME, MIGRATED_MARKER):
+            # 旧 venv（v0.2 一键装产物）不搬：必然与新家 bootstrap venv 撞名，且属过期工具态
+            if entry.name in (_LOCK_NAME, MIGRATED_MARKER, _VENV_NAME):
                 continue
             _move_verified(entry, data_dir / _new_rel(entry.name))
         (legacy / MIGRATED_MARKER).write_text(f"{data_dir}\n", encoding="utf-8")
@@ -129,9 +142,10 @@ def _skip(data_dir: Path, legacy: Path) -> bool:
         return True  # XDG 显式档：新旧同址，直用不迁
     if not legacy.is_dir() or (legacy / MIGRATED_MARKER).exists():
         return True
-    if not any(p.name not in (_LOCK_NAME, MIGRATED_MARKER) for p in legacy.iterdir()):
-        return True  # 空旧目录（或只剩指针残留）
-    if data_dir.exists() and any(data_dir.iterdir()):
+    if not any(p.name not in (_LOCK_NAME, MIGRATED_MARKER, _VENV_NAME)
+               for p in legacy.iterdir()):
+        return True  # 空旧目录（或只剩指针/旧 venv 残留）
+    if data_dir.exists() and any(p.name != _VENV_NAME for p in data_dir.iterdir()):
         log.warning("旧目录数据未迁移（新目录已非空），如需合并请手动处理: %s", legacy)
         return True
     return False

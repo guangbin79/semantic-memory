@@ -153,8 +153,8 @@ def test_migrate_refused_on_live_pid(monkeypatch, tmp_path):
     legacy = _make_legacy(home)
     (legacy / "memory.db.server.json").write_text(
         json.dumps({"pid": os.getpid(), "port": 8765}), encoding="utf-8")  # 活实例 = 自己
-    with pytest.raises(MigrationRefused):
-        migrate_legacy()
+    # v0.3 契约：拒迁不再上抛（单目录事实），记日志、数据不动、返回 False
+    assert migrate_legacy() is False
     assert (legacy / "memory.db").exists()       # 拒迁：数据不动
     assert not (legacy / "MIGRATED").exists()
     assert not (home / "semantic-memory").exists()
@@ -166,8 +166,7 @@ def test_migrate_refused_when_flock_held(monkeypatch, tmp_path):
     fd = os.open(legacy / ".migrate.lock", os.O_CREAT | os.O_RDWR, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)  # 模拟另一迁移进程持锁
-        with pytest.raises(MigrationRefused):
-            migrate_legacy()
+        assert migrate_legacy() is False  # 拒迁不上抛（v0.3 契约）：记日志返回 False
     finally:
         os.close(fd)
     assert (legacy / "memory.db").exists()
@@ -279,6 +278,53 @@ def test_migrate_both_legacies_first_wins_second_skipped(monkeypatch, tmp_path):
     assert (v023 / "config.toml").exists()
     assert not (v023 / "MIGRATED").exists()
     assert xdg_legacy.joinpath("MIGRATED").exists()
+
+
+def test_migrate_refused_first_dir_second_still_migrates(monkeypatch, tmp_path):
+    """[隔离] 首目录拒迁（活实例）不阻塞次目录——文档承诺「互不阻塞」。"""
+    home = _sandbox(monkeypatch, tmp_path)
+    xdg_legacy = _make_legacy(home)
+    (xdg_legacy / "memory.db.server.json").write_text(
+        json.dumps({"pid": os.getpid()}), encoding="utf-8")  # 首目录：活实例拒迁
+    v023 = home / "semantic-memory-mcp"
+    v023.mkdir(parents=True)
+    (v023 / "seed.txt").write_text("v023", encoding="utf-8")
+
+    assert migrate_legacy() is True  # 次目录照迁
+    assert (home / "semantic-memory" / "seed.txt").read_text() == "v023"
+    assert v023.joinpath("MIGRATED").exists()
+    assert (xdg_legacy / "memory.db").exists()      # 拒迁目录原封不动
+    assert not (xdg_legacy / "MIGRATED").exists()
+
+
+def test_migrate_bootstrap_venv_in_new_home(monkeypatch, tmp_path):
+    """[venv 感知] 新家只有 setup.sh bootstrap 建的 venv/ → 仍视为可迁移。"""
+    home = _sandbox(monkeypatch, tmp_path)
+    legacy = _make_legacy(home)
+    new = home / "semantic-memory"
+    new.mkdir()
+    (new / "venv").mkdir()  # 一键安装先建 venv 的场景（[02]）
+
+    assert migrate_legacy() is True
+    assert (new / "data" / "memory.db").exists()
+    assert (new / "models").exists()
+    assert (new / "venv").is_dir()  # bootstrap venv 原样保留
+    assert legacy.joinpath("MIGRATED").exists()
+
+
+def test_migrate_skips_stale_venv_in_legacy(monkeypatch, tmp_path):
+    """[venv 感知] v0.2 旧家自带的旧 venv/ 不搬（必撞新家 venv 名），其余照迁。"""
+    home = _sandbox(monkeypatch, tmp_path)
+    legacy = _make_legacy(home)
+    (legacy / "venv" / "bin").mkdir(parents=True)
+    (legacy / "venv" / "bin" / "python").write_text("stale")
+
+    assert migrate_legacy() is True
+    new = home / "semantic-memory"
+    assert (new / "data" / "memory.db").exists()
+    assert not (new / "venv").exists()          # 旧 venv 不落新家
+    assert (legacy / "venv" / "bin" / "python").exists()  # 原地留存
+    assert legacy.joinpath("MIGRATED").exists()
 
 def test_server_startup_triggers_migration(tmp_path):
     """核心单例物化即迁移（v0.3 起 import 零副作用，属性访问触发；serve 同链）。"""

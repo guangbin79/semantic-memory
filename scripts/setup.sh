@@ -15,7 +15,7 @@ set -euo pipefail
 TAG="v0.3.0"   # 钉 release tag；与 README curl 示例同源，升级 = 改这一处
 REMOTE_SPEC="git+https://github.com/guangbin79/semantic-memory.git@${TAG}#egg=semantic-memory[embed]"
 
-# ---- TARGET 解析：--data-dir（两种写法）> MEMORY_DATA_DIR > ~/semantic-memory ----
+# ---- TARGET 解析：--data-dir（两种写法）> MEMORY_DATA_DIR > XDG > ~/semantic-memory（与 paths.py 同构；~ 展开）----
 data_dir_arg=""
 prev=""
 for a in "$@"; do
@@ -23,7 +23,15 @@ for a in "$@"; do
   if [[ $a == --data-dir=* ]]; then data_dir_arg=${a#--data-dir=}; fi
   prev=$a
 done
-TARGET="${data_dir_arg:-${MEMORY_DATA_DIR:-$HOME/semantic-memory}}"
+if [[ -n $data_dir_arg ]]; then
+  TARGET="${data_dir_arg/#\~/$HOME}"
+elif [[ -n ${MEMORY_DATA_DIR:-} ]]; then
+  TARGET="${MEMORY_DATA_DIR/#\~/$HOME}"
+elif [[ -n ${XDG_DATA_HOME:-} ]]; then
+  TARGET="$XDG_DATA_HOME/memory-mcp"
+else
+  TARGET="$HOME/semantic-memory"
+fi
 
 # ---- 前置：选一个 >= 3.11 的解释器（tomllib 是硬依赖；Ubuntu 等系统 python3 常偏旧）----
 PY=""
