@@ -406,3 +406,39 @@ def test_install_hint_gating(client, monkeypatch):
     monkeypatch.setattr(server, "HAS_NUMPY", True)
     assert "install_hint" not in client.get("/health").json()
     assert "install_hint" not in client.get("/api/stats").json()
+
+
+# ---------- 跨项目记忆图谱（第四期） ----------
+
+def test_recall_cross_project_co_injection_extra(client):
+    """查 A 项目能带出 B 项目同源解法：共注入过的 B 条目以 cross_kind 标记追加。"""
+    ua = client.post("/ingest", json={"content": "跨项目图谱种子条目 XG7", "kind": "fact",
+                                "source": "test", "project": "cross-a"}).json()["uid"]
+    ub = client.post("/ingest", json={"content": "跨项目同源解法条目 XG8", "kind": "fact",
+                                "source": "test", "project": "cross-b"}).json()["uid"]
+    client.post("/inject/report", json={"harness": "test", "hook": "context",
+                                       "query": "xg", "uids": [ua, ub], "chars": 64,
+                                       "project": "cross-a"})
+    hits = client.post("/recall", json={"query": "图谱种子条目", "limit": 3,
+                                       "project": "cross-a"}).json()["hits"]
+    cross = [h for h in hits if h.get("cross_kind")]
+    assert any(h["uid"] == ub and h["cross_kind"] == "co_injection"
+               and h["via_uid"] == ua for h in cross)
+    # 主结果在前、附加条目在后，不占用主配额
+    assert [h for h in hits if not h.get("cross_kind")][0]["uid"] == ua
+
+
+def test_api_graph_endpoint(client):
+    """GET /api/graph?uid= 可遍历三种边（观测面，管理面含被取代前代）。"""
+    r = client.get("/api/graph", params={"uid": "nonexistent"})
+    assert r.status_code == 200 and r.json()["edges"] == []
+    # 取代链：旧→新，从新条目可查到前代
+    old = client.post("/ingest", json={"content": "图谱旧版条目 XG9", "source": "test", "project": "cross-a"}).json()["uid"]
+    new = client.post("/ingest", json={"content": "图谱新版条目 XG10", "source": "test", "project": "cross-a"}).json()["uid"]
+    with server.store.conn:
+        server.store.conn.execute(
+            "UPDATE memories SET superseded_by=?, superseded_at=? WHERE uid=?",
+            (new, 1234.5, old))
+    edges = client.get("/api/graph", params={"uid": new}).json()["edges"]
+    assert any(e["kind"] == "supersedes" and e["to_uid"] == old
+               and e["superseded"] is True for e in edges)

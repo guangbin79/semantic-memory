@@ -37,6 +37,7 @@ from .config import Config
 from .db import MemoryStore
 from .distiller import Distiller
 from .embedder import Embedder
+from .graph import cross_project_extras, graph_edges
 from .hybrid import hybrid_recall
 from .lifecycle import (
     backfill_vectors,
@@ -190,13 +191,22 @@ def _recall_hits(query: str, limit: int, project: str | None, global_limit: int)
             scope="global", query_vec=q,
         )
         seen = {h["uid"] for h in proj_hits}
-        return (proj_hits + [h for h in glob_hits if h["uid"] not in seen])[:limit]
-    return hybrid_recall(
-        store, embedder, query=query, limit=limit, project=project,
-        rrf_k=cfg.rrf_k, inject_boost=cfg.inject_boost,
-        min_cosine=cfg.recall_min_cosine, max_cosine=cfg.recall_max_cosine,
-        reranker=reranker, rerank_candidates=cfg.rerank_candidates,
-    )
+        merged = (proj_hits + [h for h in glob_hits if h["uid"] not in seen])[:limit]
+    else:
+        merged = hybrid_recall(
+            store, embedder, query=query, limit=limit, project=project,
+            rrf_k=cfg.rrf_k, inject_boost=cfg.inject_boost,
+            min_cosine=cfg.recall_min_cosine, max_cosine=cfg.recall_max_cosine,
+            reranker=reranker, rerank_candidates=cfg.rerank_candidates,
+        )
+    # 跨项目图谱：主结果后追加同源解法（不占主配额；全局域走上面的两路召回）
+    if project and cfg.cross_project and merged:
+        seen = {h["uid"] for h in merged}
+        merged += [e for e in cross_project_extras(
+            store, merged, project=project,
+            cross_sim=cfg.cross_sim, limit=cfg.cross_limit)
+            if e["uid"] not in seen]
+    return merged
 
 
 # ---------------- REST 端点（鉴权与传输门由 _Handler 负责） ----------------
@@ -252,6 +262,32 @@ def api_memories(q: dict) -> dict:
          "created_at": r["created_at"], "updated_at": r["updated_at"]}
         for r in rows
     ]}
+
+
+def api_graph(q: dict) -> dict:
+    """GET /api/graph?uid=：单条目 1-hop 边（三种；以 to_uid 为种子再查即链式遍历）。
+
+    取代链前代经管理面读出（召回面不可见，此处仅观测）；superseded=True 标记
+    被取代邻居。cross_sim 可选参数覆盖默认阈值。未知 uid 返回空边集。
+    """
+    uid = (q.get("uid") or "").strip()
+    row = store.get_one(uid) if uid else None
+    if row is None:
+        return {"uid": uid, "project": None, "edges": []}
+    try:
+        sim = float(q.get("cross_sim", cfg.cross_sim))
+    except (TypeError, ValueError):
+        sim = cfg.cross_sim
+    return {
+        "uid": uid, "project": row["project"],
+        "edges": [
+            {"kind": e["kind"], "from_uid": e["from_uid"], "to_uid": e["to_uid"],
+             "to_project": e["to_project"], "weight": e["weight"],
+             "to_kind": e["to_row"]["kind"], "to_content": e["to_row"]["content"][:120],
+             "superseded": e["kind"] == "supersedes"}
+            for e in graph_edges(store, [uid], cross_sim=sim)
+        ],
+    }
 
 
 def api_forget(uid: str) -> dict:
@@ -508,6 +544,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 if not _authorized(self.headers):
                     return self._send_json({"error": "unauthorized"}, 401)
                 return self._send_json(api_memories(q))
+            if path == "/api/graph":
+                if not _authorized(self.headers):
+                    return self._send_json({"error": "unauthorized"}, 401)
+                return self._send_json(api_graph(q))
             return self._send_json({"error": "not found"}, 404)
 
         if method == "DELETE":
