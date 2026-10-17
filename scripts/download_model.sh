@@ -2,7 +2,14 @@
 # 下载 Qwen3-Embedding-0.6B GGUF（约 0.6GB，Q8_0）
 set -euo pipefail
 
-MODEL_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/memory-mcp/models"
+# 模型目录随数据目录三档解析（与 paths.py / download_models.sh 同语义）
+if [ -n "${MEMORY_DATA_DIR:-}" ]; then
+  MODEL_DIR="$MEMORY_DATA_DIR/models"
+elif [ -n "${XDG_DATA_HOME:-}" ]; then
+  MODEL_DIR="$XDG_DATA_HOME/memory-mcp/models"
+else
+  MODEL_DIR="$HOME/semantic-memory/models"
+fi
 mkdir -p "$MODEL_DIR"
 
 FILE="Qwen3-Embedding-0.6B-Q8_0.gguf"

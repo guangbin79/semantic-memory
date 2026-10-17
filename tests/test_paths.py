@@ -54,7 +54,7 @@ def _make_legacy(home: Path, *, with_db=True, with_models=True) -> Path:
 def test_resolve_data_dir_tier_matrix(monkeypatch, tmp_path):
     home = _sandbox(monkeypatch, tmp_path)
     # tier 3：全未设 → ~/semantic-memory-mcp
-    assert resolve_data_dir() == home / "semantic-memory-mcp"
+    assert resolve_data_dir() == home / "semantic-memory"
     # tier 1：MEMORY_DATA_DIR 显式（含 ~ 展开）压过一切
     monkeypatch.setenv("MEMORY_DATA_DIR", str(tmp_path / "custom"))
     assert resolve_data_dir() == tmp_path / "custom"
@@ -69,7 +69,7 @@ def test_resolve_data_dir_tier_matrix(monkeypatch, tmp_path):
     assert resolve_data_dir() == tmp_path / "xdg" / "memory-mcp"
     # XDG 设但空串也回退 $HOME 档（or 写法，同 config.py）
     monkeypatch.setenv("XDG_DATA_HOME", "")
-    assert resolve_data_dir() == home / "semantic-memory-mcp"
+    assert resolve_data_dir() == home / "semantic-memory"
 
 
 def test_legacy_data_dir_follows_xdg_or_home(monkeypatch, tmp_path):
@@ -85,7 +85,7 @@ def test_migrate_moves_db_and_models_writes_migrated(monkeypatch, tmp_path):
     home = _sandbox(monkeypatch, tmp_path)
     legacy = _make_legacy(home)
     assert migrate_legacy() is True
-    new = home / "semantic-memory-mcp"
+    new = home / "semantic-memory"
     # 旧库 → <data>/data/memory.db，行还在；模型目录原位落新根
     conn = sqlite3.connect(new / "data" / "memory.db")
     assert conn.execute("SELECT v FROM t").fetchall() == [("hello-migration",)]
@@ -100,7 +100,7 @@ def test_migrate_idempotent_second_call_noop(monkeypatch, tmp_path):
     home = _sandbox(monkeypatch, tmp_path)
     _make_legacy(home)
     assert migrate_legacy() is True
-    new = home / "semantic-memory-mcp"
+    new = home / "semantic-memory"
     before = sorted(str(p.relative_to(new)) for p in new.rglob("*"))
     assert migrate_legacy() is False  # MIGRATED 已在 → 跳过
     after = sorted(str(p.relative_to(new)) for p in new.rglob("*"))
@@ -110,7 +110,7 @@ def test_migrate_idempotent_second_call_noop(monkeypatch, tmp_path):
 def test_migrate_skips_when_new_dir_nonempty(monkeypatch, tmp_path):
     home = _sandbox(monkeypatch, tmp_path)
     legacy = _make_legacy(home)
-    new = home / "semantic-memory-mcp"
+    new = home / "semantic-memory"
     new.mkdir(parents=True)
     (new / "config.toml").write_text('device = "cpu"\n', encoding="utf-8")
     assert migrate_legacy() is False
@@ -157,7 +157,7 @@ def test_migrate_refused_on_live_pid(monkeypatch, tmp_path):
         migrate_legacy()
     assert (legacy / "memory.db").exists()       # 拒迁：数据不动
     assert not (legacy / "MIGRATED").exists()
-    assert not (home / "semantic-memory-mcp").exists()
+    assert not (home / "semantic-memory").exists()
 
 
 def test_migrate_refused_when_flock_held(monkeypatch, tmp_path):
@@ -171,7 +171,7 @@ def test_migrate_refused_when_flock_held(monkeypatch, tmp_path):
     finally:
         os.close(fd)
     assert (legacy / "memory.db").exists()
-    assert not (home / "semantic-memory-mcp" / "data").exists()
+    assert not (home / "semantic-memory" / "data").exists()
 
 
 def test_migrate_wal_checkpoint_front_loaded(monkeypatch, tmp_path):
@@ -186,7 +186,7 @@ def test_migrate_wal_checkpoint_front_loaded(monkeypatch, tmp_path):
     try:
         assert (legacy / "memory.db-wal").stat().st_size > 0  # 前提：帧确实滞留 wal
         assert migrate_legacy() is True
-        probe = sqlite3.connect(home / "semantic-memory-mcp" / "data" / "memory.db")
+        probe = sqlite3.connect(home / "semantic-memory" / "data" / "memory.db")
         rows = probe.execute("SELECT v FROM t ORDER BY v").fetchall()
         probe.close()
         assert rows == [("hello-migration",), ("only-in-wal",)]
@@ -208,7 +208,7 @@ def test_migrate_crossfs_copy_sha256_verified(monkeypatch, tmp_path):
     monkeypatch.setattr(paths.os, "rename", _exdev)
     assert migrate_legacy() is True
     monkeypatch.setattr(paths.os, "rename", real_rename)
-    new = home / "semantic-memory-mcp"
+    new = home / "semantic-memory"
     assert (new / "models" / "qwen3-reranker-0.6b-q8_0.gguf").read_bytes() == src_digest
     assert not (legacy / "models").exists()  # 校验通过 → 源已清
     assert (legacy / "MIGRATED").exists()
@@ -225,20 +225,60 @@ def test_migrate_sha256_mismatch_keeps_both_sides(monkeypatch, tmp_path):
     monkeypatch.setattr(paths.os, "rename", _exdev)
     real_sha = paths._sha256
     monkeypatch.setattr(paths, "_sha256",
-                        lambda p: real_sha(p) + "x" if "semantic-memory-mcp" in str(p) else real_sha(p))
+                        lambda p: real_sha(p) + "x" if "/semantic-memory/" in str(p) else real_sha(p))
     with pytest.raises(MigrationError):
         migrate_legacy()
     monkeypatch.setattr(paths.os, "rename", os.rename)
     assert (legacy / "memory.db").exists()  # 源在
-    assert (home / "semantic-memory-mcp" / "data" / "memory.db").exists()  # 目标也在
+    assert (home / "semantic-memory" / "data" / "memory.db").exists()  # 目标也在
     assert not (legacy / "MIGRATED").exists()
 
 
 def test_migrate_no_legacy_noop(monkeypatch, tmp_path):
     home = _sandbox(monkeypatch, tmp_path)
     assert migrate_legacy() is False
-    assert not (home / "semantic-memory-mcp").exists()  # 跳过时不创建新目录
+    assert not (home / "semantic-memory").exists()  # 跳过时不创建新目录
 
+
+
+def test_migrate_v023_home_legacy(monkeypatch, tmp_path):
+    """v0.2 家目录 ~/semantic-memory-mcp → ~/semantic-memory 自动迁移（v0.3 改名）。"""
+    home = _sandbox(monkeypatch, tmp_path)
+    old_home = home / "semantic-memory-mcp"
+    old_home.joinpath("data").mkdir(parents=True)
+    conn = sqlite3.connect(old_home / "data" / "memory.db")
+    conn.execute("CREATE TABLE t (v TEXT)")
+    conn.execute("INSERT INTO t VALUES ('v023-home')")
+    conn.commit()
+    conn.close()
+    (old_home / "models").mkdir()
+    (old_home / "models" / "m.gguf").write_bytes(b"gguf")
+
+    assert migrate_legacy() is True
+    new = home / "semantic-memory"
+    probe = sqlite3.connect(new / "data" / "memory.db")
+    assert probe.execute("SELECT v FROM t").fetchall() == [("v023-home",)]
+    probe.close()
+    assert (new / "models" / "m.gguf").read_bytes() == b"gguf"
+    assert old_home.joinpath("MIGRATED").read_text(encoding="utf-8").strip() == str(new)
+    assert sorted(p.name for p in old_home.iterdir()) == ["MIGRATED"]
+
+
+def test_migrate_both_legacies_first_wins_second_skipped(monkeypatch, tmp_path):
+    """两代旧目录并存：老档先迁，v0.2 档因新家非空按护栏告警跳过（数据不动）。"""
+    home = _sandbox(monkeypatch, tmp_path)
+    xdg_legacy = _make_legacy(home)
+    v023 = home / "semantic-memory-mcp"
+    v023.mkdir(parents=True)
+    (v023 / "config.toml").write_text('device = "cpu"\n', encoding="utf-8")
+
+    assert migrate_legacy() is True  # xdg 档迁成
+    new = home / "semantic-memory"
+    assert (new / "models").exists()
+    # v0.2 档被跳过：内容原封、无指针
+    assert (v023 / "config.toml").exists()
+    assert not (v023 / "MIGRATED").exists()
+    assert xdg_legacy.joinpath("MIGRATED").exists()
 
 def test_server_startup_triggers_migration(tmp_path):
     """核心单例物化即迁移（v0.3 起 import 零副作用，属性访问触发；serve 同链）。"""
@@ -257,6 +297,6 @@ def test_server_startup_triggers_migration(tmp_path):
     proc = subprocess.run([sys.executable, "-c", "import semantic_memory.server as s; s.store"],
                           env=env, cwd=REPO, capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0, proc.stderr
-    new = home / "semantic-memory-mcp"
+    new = home / "semantic-memory"
     assert (new / "models" / "qwen3-reranker-0.6b-q8_0.gguf").exists()
     assert (legacy / "MIGRATED").read_text(encoding="utf-8").strip() == str(new)

@@ -189,7 +189,7 @@ def run_setup(argv: list[str] | None = None, *, client=None, out=sys.stdout) -> 
                     help="full=嵌入+蒸馏+重排（默认）；embed=仅嵌入；bm25=零下载纯检索")
     ap.add_argument("--device", choices=("auto", "cuda", "cpu"), default="auto",
                     help="auto=按 nvidia-smi 探测（默认）")
-    ap.add_argument("--data-dir", help="数据目录（默认按 MEMORY_DATA_DIR/XDG/~/semantic-memory-mcp 解析）")
+    ap.add_argument("--data-dir", help="数据目录（默认按 MEMORY_DATA_DIR/XDG/~/semantic-memory 解析）")
     ap.add_argument("--json", action="store_true", help="机器可读报告（agent 通道）")
     ap.add_argument("--yes", action="store_true", help="免确认（非交互 stdin 自动继续）")
     ns = ap.parse_args(argv)

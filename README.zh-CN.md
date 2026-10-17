@@ -1,11 +1,9 @@
-> 仓库更名待办：**semantic-memory-mcp → semantic-memory**——在 GitHub Settings 里改名后执行 `git remote set-url origin git@github.com:guangbin79/semantic-memory.git`；旧链接自动重定向。
-
 # semantic-memory
 
 **[English](README.md) | [中文](README.zh-CN.md)**
 
-> **已更名** —— 本项目先前以 `semantic-memory-mcp` 发布；旧默认家目录
-> `~/.local/share/memory-mcp/` 的数据会在首次启动时自动迁移（见下文「统一家目录」）。
+> 旧家目录（`~/.local/share/memory-mcp/` 与 v0.2 的 `~/semantic-memory-mcp/`）数据
+> 会在首次启动时自动迁移（见下文「统一家目录」）。
 
 coding agent 上下文管理的**侧车（sidecar）**：提供**模型语义级**的上下文检索，
 确保上下文相关性不丢失。
@@ -72,11 +70,11 @@ localhost:8765"——只有 opencode v2 需要进程内插件，因为它的钩�
 
 ### 一键安装（探测 → 校验下载 → 写配置 → 冒烟）
 
-人，一条 curl（钉 release tag v0.2.0）：
+人，一条 curl（钉 release tag v0.3.0）：
 
 ```bash
 curl -fsSL \
-  https://raw.githubusercontent.com/guangbin79/semantic-memory-mcp/v0.2.0/scripts/setup.sh \
+  https://raw.githubusercontent.com/guangbin79/semantic-memory/v0.3.0/scripts/setup.sh \
   | bash -s -- --profile full --json --yes
 ```
 
@@ -86,15 +84,15 @@ agent（仓库已签出）：
 bash scripts/setup.sh --profile full --json --yes
 ```
 
-两者都会建出完全自立的 `~/semantic-memory-mcp/`（venv + sha256 校验下载模型 +
+两者都会建出完全自立的 `~/semantic-memory/`（venv + sha256 校验下载模型 +
 `config.toml` + 冒烟）。`--profile` 选档：`full`（嵌入+蒸馏+重排，默认）/
 `embed` / `bm25`（零下载）。`--json` 报告为机器可读单行；之后一切命令都是
-`~/semantic-memory-mcp/venv/bin/semantic-memory …`。
+`~/semantic-memory/venv/bin/semantic-memory …`。
 
 ### 起服
 
 ```bash
-semantic-memory serve    # 或：~/semantic-memory-mcp/venv/bin/semantic-memory serve
+semantic-memory serve    # 或：~/semantic-memory/venv/bin/semantic-memory serve
 # → http://127.0.0.1:8765  （REST API + 浏览页；MEMORY_PORT=0 = OS 随机端口）
 ```
 
@@ -122,18 +120,19 @@ cp integrations/opencode/memory.ts ~/.config/opencode/plugins/
 其余宿主都是"钩子事件 → curl localhost:8765"的薄适配器——见
 `integrations/README.md`。
 
-### 统一家目录：`~/semantic-memory-mcp/`
+### 统一家目录：`~/semantic-memory/`
 
 | 路径 | 内容 |
 |---|---|
-| `~/semantic-memory-mcp/venv/` | 自带虚拟环境（一键安装） |
-| `~/semantic-memory-mcp/models/` | GGUF 模型（嵌入 / 蒸馏 / 重排） |
-| `~/semantic-memory-mcp/data/memory.db` | SQLite 记忆库（`MEMORY_DB_PATH` 默认） |
-| `~/semantic-memory-mcp/config.toml` | 文件配置层：env > 此文件 > 内置默认 |
+| `~/semantic-memory/venv/` | 自带虚拟环境（一键安装） |
+| `~/semantic-memory/models/` | GGUF 模型（嵌入 / 蒸馏 / 重排） |
+| `~/semantic-memory/data/memory.db` | SQLite 记忆库（`MEMORY_DB_PATH` 默认） |
+| `~/semantic-memory/config.toml` | 文件配置层：env > 此文件 > 内置默认 |
 
 解析序：`MEMORY_DATA_DIR` > 显式 `XDG_DATA_HOME`（→
-`$XDG_DATA_HOME/memory-mcp/`）> `~/semantic-memory-mcp/`。**旧目录自动迁移**：
-首次启动时，改名前的 `~/.local/share/memory-mcp/` 会整体平移进来——先
+`$XDG_DATA_HOME/memory-mcp/`）> `~/semantic-memory/`。**旧目录自动迁移**：
+首次启动时，历代旧家目录（`~/.local/share/memory-mcp/`、v0.2 的
+`~/semantic-memory-mcp/`）会逐个整体平移进来——先
 wal_checkpoint，逐文件 sha256 校验，旧服务还在跑则拒迁，旧目录最终只留一个
 `MIGRATED` 指针文件。幂等；未校验通过绝不删数据。
 
@@ -155,8 +154,8 @@ wal_checkpoint，逐文件 sha256 校验，旧服务还在跑则拒迁，旧目�
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `MEMORY_DATA_DIR` | `~/semantic-memory-mcp/`（解析序：此 env > 显式 `XDG_DATA_HOME` → `$XDG_DATA_HOME/memory-mcp/` > 默认家目录） | 数据家目录覆写：models/ data/ config.toml 都在其下 |
-| `MEMORY_DB_PATH` | `~/semantic-memory-mcp/data/memory.db` | 数据库路径（只覆 db 本身；家目录其余部分不受影响） |
+| `MEMORY_DATA_DIR` | `~/semantic-memory/`（解析序：此 env > 显式 `XDG_DATA_HOME` → `$XDG_DATA_HOME/memory-mcp/` > 默认家目录） | 数据家目录覆写：models/ data/ config.toml 都在其下 |
+| `MEMORY_DB_PATH` | `~/semantic-memory/data/memory.db` | 数据库路径（只覆 db 本身；家目录其余部分不受影响） |
 | `MEMORY_MODEL_PATH` | 空 | 嵌入 GGUF 模型路径；空 = 纯 BM25 降级 |
 | `MEMORY_DEVICE` | `cuda` | 嵌入设备：`cuda`（默认，失败自动回退 CPU）/ `cpu` |
 | `MEMORY_EMBED_DIM` | `1024` | 嵌入维度 |
@@ -168,7 +167,7 @@ wal_checkpoint，逐文件 sha256 校验，旧服务还在跑则拒迁，旧目�
 | `MEMORY_RECALL_MIN_COSINE` | `0.45` | 纯向量命中的余弦门限（BM25 命中恒放行）；`0` = 关闭 |
 | `MEMORY_RECALL_MAX_COSINE` | `0.92` | 冗余上限：纯向量命中超过此值按冗余出局（BM25 不受影响）；`1.0` = 关闭 |
 | `MEMORY_INJECT_BOOST` | `0.15` | 遥测反哺：score × (1 + α·ln(1+注入次数))；`0` = 关闭 |
-| `MEMORY_RERANK_MODEL` | `~/semantic-memory-mcp/models/qwen3-reranker-0.6b-q8_0.gguf` | 重排 GGUF（**仅 ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF**——官方转换，社区镜像可能缺 rank 头）；默认指向常规路径（门禁 2026-10-16 PASSED：recall@5 0.939 vs 基线 0.909）——文件在即启用，缺失优雅关闭并告警；设空禁用 |
+| `MEMORY_RERANK_MODEL` | `~/semantic-memory/models/qwen3-reranker-0.6b-q8_0.gguf` | 重排 GGUF（**仅 ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF**——官方转换，社区镜像可能缺 rank 头）；默认指向常规路径（门禁 2026-10-16 PASSED：recall@5 0.939 vs 基线 0.909）——文件在即启用，缺失优雅关闭并告警；设空禁用 |
 
 **云通道隐私。** 配置 `MEMORY_CLOUD_BASE_URL` + `MEMORY_CLOUD_API_KEY` + `MEMORY_CLOUD_MODEL`（且 `MEMORY_CLOUD_ENABLED` ≠ `0`，默认）即意味着**记忆内容会发送至该端点**——经确定性预过滤的近邻簇成员及其直接邻域，绝非全库。云端只返回**元数据操作计划**（按 uid 的 `supersede`/`touch`）：云生成的任何内容都不入库，计划中出现疑似注入模式即整批丢弃。每日硬顶（`MEMORY_CLOUD_DAILY_MAX_CALLS` / `MEMORY_CLOUD_DAILY_MAX_TOKENS`）是进程内存计数——**服务重启即重置**。`MEMORY_CLOUD_ENABLED=0` 是优先级最高的 kill switch。
 | `MEMORY_RERANK_CANDIDATES` | `20` | RRF 融合后送入重排的候选条数 |
@@ -254,7 +253,7 @@ MEMORY_PORT=0 semantic-memory
 ## 存储布局
 
 一切收在**一个 SQLite 文件**里（`MEMORY_DB_PATH`，默认
-`~/semantic-memory-mcp/data/memory.db`）：
+`~/semantic-memory/data/memory.db`）：
 
 | 对象 | 内容 |
 |---|---|
@@ -266,8 +265,9 @@ MEMORY_PORT=0 semantic-memory
 运行期有 WAL 伴生文件（`-wal`、`-shm`）；GGUF 模型（~600MB）是独立文件。
 删除 db 文件即干净的全量重置——没有其他状态。备份用
 `sqlite3 memory.db ".backup '/path/to/backup.db'"`。与 ctx-semantic 不同，
-向量矩阵每次查询从 SQLite 现读（page cache 可撑到 ~50k 条）——
-没有任何缓存失效逻辑。
+没有 ANN 需要构建或重建——且自 v0.3 起向量矩阵按 `(project, scope)` 键进程内
+缓存，由 `PRAGMA data_version`（任何连接提交即推进，含 distill flush 的独立
+连接）+ 本连接写计数双轨失效。无写入交错的召回不再付 SQLite 向量读。
 
 ## 共享模型
 
@@ -375,8 +375,14 @@ semantic-memory eval --golden FILE [--k 1,3,5] [--judge]
 ```
 
 golden jsonl 每行 `{query, expect_uids[], project?}`；逐行输出 @k 命中，末尾
-recall@k / MRR 汇总与 JSON 报告。`--judge` 用蒸馏模型对未命中样本做相关性
-评注（未配蒸馏模型则静默跳过）。纯 CLI——绝不进入任何服务端点。
+recall@k / MRR 汇总与 JSON 报告。纯 CLI——绝不进入任何服务端点。
+
+**评测飞轮（v0.3）**：`semantic-memory golden [--out FILE]` 从真实注入遥测构建
+golden 集（按 `(project, query)` 去重、取最近注入——供给侧标签：注入≠采纳，
+但作为 recall@k 期望集自洽）。`--judge` 以 **Reranker** 评注未命中：期望内容
+相关分高 = 检索真 miss，分低 = golden 标签本身可疑（无重排模型则优雅跳过）。
+`--min-recall K:FLOAT`（如 `5:0.85`）把 eval 变成门禁——低于门槛退出码 1
+（CI/回归用；`.github/workflows/ci.yml` 经 `MEMORY_GOLDEN`+`MEMORY_MIN_RECALL` 接线）。
 `tests/fixtures/golden.sample.jsonl` 仅为 3 行格式示例；闸门用的真实集
 （从你自己的记忆库构建 ≥30 条真实查询）决定重排默认：**在真实集上 eval
 显示 recall@5 ≥ RRF 基线之前，重排保持关闭。**
@@ -482,8 +488,3 @@ npm test          # 构建 + mock-ctx 钩子断言（打真实服务；
 - [ ] 第四期：两字中文词 bigram 通道（触发条件：纯 BM25 模式出现真实漏召回）、
       跨项目记忆图谱、冷文件归档
 
-## 致谢
-
-架构参考：[Basic Memory](https://github.com/basicmachines-co/basic-memory)（Markdown+SQLite FTS）、
-[ctx-semantic](https://github.com/guangbin79/ctx-semantic)（BM25+Qwen3-Embedding+RRF）、
-[context-mode](https://github.com/mksglu/context-mode)（钩子拦截范式）。

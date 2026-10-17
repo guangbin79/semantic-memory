@@ -10,13 +10,13 @@
 #   download_models.sh --audit  README env 表 vs 代码默认值逐一比对，不一致退出非零
 set -euo pipefail
 
-# 模型目录随数据目录三档解析（与 paths.py 同语义，B1 统一目录后默认 ~/semantic-memory-mcp）
+# 模型目录随数据目录三档解析（与 paths.py 同语义，v0.3 起默认 ~/semantic-memory）
 if [ -n "${MEMORY_DATA_DIR:-}" ]; then
   MODEL_DIR="$MEMORY_DATA_DIR/models"
 elif [ -n "${XDG_DATA_HOME:-}" ]; then
   MODEL_DIR="$XDG_DATA_HOME/memory-mcp/models"
 else
-  MODEL_DIR="$HOME/semantic-memory-mcp/models"
+  MODEL_DIR="$HOME/semantic-memory/models"
 fi
 mkdir -p "$MODEL_DIR"
 

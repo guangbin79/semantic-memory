@@ -235,7 +235,7 @@ def test_real_model_smoke():
     assert d.available
     out = d.distill(
         ["用户决定：部署分支固定为 release/2026，理由是发布出问题回滚更快"],
-        "github.com/guangbin79/semantic-memory-mcp",
+        "github.com/guangbin79/semantic-memory",
     )
     assert out is not None and out, "真模型应至少提取出一条"
     entry = out[0]

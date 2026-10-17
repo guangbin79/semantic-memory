@@ -177,7 +177,7 @@ def test_import_server_no_side_effects(tmp_path):
     proc = subprocess.run([sys.executable, "-c", "import semantic_memory.server"],
                           env=env, cwd=REPO, capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0, proc.stderr
-    assert not (home / "semantic-memory-mcp").exists(), "import 不得触发迁移/建目录"
+    assert not (home / "semantic-memory").exists(), "import 不得触发迁移/建目录"
     proc = subprocess.run([sys.executable, "-c", "import semantic_memory.server as s; s.cfg"],
                           env=env, cwd=REPO, capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0, proc.stderr

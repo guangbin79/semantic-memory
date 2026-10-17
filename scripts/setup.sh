@@ -2,20 +2,20 @@
 # semantic-memory 一键自举（任务 10）：独立 venv → 装包 → 透传 setup 子命令。
 #
 # 人：curl -fsSL \
-#   https://raw.githubusercontent.com/guangbin79/semantic-memory-mcp/v0.2.0/scripts/setup.sh \
+#   https://raw.githubusercontent.com/guangbin79/semantic-memory/v0.3.0/scripts/setup.sh \
 #   | bash -s -- --profile full --json --yes
 # agent：bash scripts/setup.sh --profile full --json --yes
 #
-# 数据目录（TARGET）：--data-dir > MEMORY_DATA_DIR > ~/semantic-memory-mcp；
+# 数据目录（TARGET）：--data-dir > MEMORY_DATA_DIR > ~/semantic-memory；
 # venv 建在 TARGET/venv，与服务数据同居、完全自立。
 # MEMORY_MCP_SRC=<仓库路径> 覆写为本地源安装（开发/测试）；默认钉 TAG 安装，禁 HEAD。
 # stdout 纪律：本脚本一切杂讯走 stderr——--json 时 stdout 恰为 setup 的单行 JSON。
 set -euo pipefail
 
-TAG="v0.2.0"   # 钉 release tag；与 README curl 示例同源，升级 = 改这一处
-REMOTE_SPEC="git+https://github.com/guangbin79/semantic-memory-mcp.git@${TAG}#egg=semantic-memory[embed]"
+TAG="v0.3.0"   # 钉 release tag；与 README curl 示例同源，升级 = 改这一处
+REMOTE_SPEC="git+https://github.com/guangbin79/semantic-memory.git@${TAG}#egg=semantic-memory[embed]"
 
-# ---- TARGET 解析：--data-dir（两种写法）> MEMORY_DATA_DIR > ~/semantic-memory-mcp ----
+# ---- TARGET 解析：--data-dir（两种写法）> MEMORY_DATA_DIR > ~/semantic-memory ----
 data_dir_arg=""
 prev=""
 for a in "$@"; do
@@ -23,7 +23,7 @@ for a in "$@"; do
   if [[ $a == --data-dir=* ]]; then data_dir_arg=${a#--data-dir=}; fi
   prev=$a
 done
-TARGET="${data_dir_arg:-${MEMORY_DATA_DIR:-$HOME/semantic-memory-mcp}}"
+TARGET="${data_dir_arg:-${MEMORY_DATA_DIR:-$HOME/semantic-memory}}"
 
 # ---- 前置：选一个 >= 3.11 的解释器（tomllib 是硬依赖；Ubuntu 等系统 python3 常偏旧）----
 PY=""
@@ -53,7 +53,7 @@ rc=$?
 set -e
 
 if [[ $rc -eq 0 ]]; then
-  REPO_TREE="https://github.com/guangbin79/semantic-memory-mcp/tree/${TAG}/integrations"
+  REPO_TREE="https://github.com/guangbin79/semantic-memory/tree/${TAG}/integrations"
   cat >&2 <<EOF
 
 下一步：

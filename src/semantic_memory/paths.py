@@ -1,9 +1,12 @@
 """数据目录三档解析（D2）+ 旧目录自动迁移（D3）。
 
 resolve_data_dir：MEMORY_DATA_DIR env > XDG_DATA_HOME 显式（→<xdg>/memory-mcp）
-> ~/semantic-memory-mcp/；XDG 设但空串回退 $HOME 档（or 写法，同 config.py）。
+> ~/semantic-memory/；XDG 设但空串回退 $HOME 档（or 写法，同 config.py）。
+#
+# v0.3 起家目录由 ~/semantic-memory-mcp/ 更名为 ~/semantic-memory/（随仓更名）；
+# 两代旧家目录（~/.local/share/memory-mcp 与 ~/semantic-memory-mcp）启动时逐个自动迁移。
 
-migrate_legacy：启动时一次（server 模块导入处调用，禁入热路径）。硬约束：
+migrate_legacy：启动时一次（server 单例物化时调用，禁入热路径），逐个处理两代旧家目录。硬约束：
 ① 旧库 wal_checkpoint(TRUNCATE) 前置；② 旧目录 flock 独占 + 发现文件 pid
 存活检查——活实例拒迁（MigrationRefused，不阻塞启动，数据原封不动）；
 ③ 跨 fs copy→sha256 校验→通过后才清旧；④ MIGRATED 指针钉在旧目录。
@@ -37,20 +40,30 @@ class MigrationError(RuntimeError):
 
 
 def resolve_data_dir() -> Path:
-    """三档解析：env > XDG 显式 > ~/semantic-memory-mcp（空串均视同未设）。"""
+    """三档解析：env > XDG 显式 > ~/semantic-memory（空串均视同未设）。"""
     env = os.environ.get("MEMORY_DATA_DIR")
     if env:
         return Path(env).expanduser()
     xdg = os.environ.get("XDG_DATA_HOME")
     if xdg:
         return Path(xdg).expanduser() / "memory-mcp"
-    return Path.home() / "semantic-memory-mcp"
+    return Path.home() / "semantic-memory"
 
 
 def legacy_data_dir() -> Path:
-    """改名前的旧默认数据目录（XDG 设但空串回退 ~/.local/share，or 写法）。"""
+    """最早的旧默认数据目录（pre-rename：~/.local/share/memory-mcp，XDG 变体同构）。"""
     base = os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share"
     return Path(base).expanduser() / "memory-mcp"
+
+
+def legacy_v023_data_dir() -> Path:
+    """v0.2.x 时代的默认家目录（repo 更名前）：~/semantic-memory-mcp。"""
+    return Path.home() / "semantic-memory-mcp"
+
+
+def legacy_data_dirs() -> tuple[Path, ...]:
+    """全部需自动迁移的旧家目录（老→新排序，逐个尝试，互不阻塞）。"""
+    return (legacy_data_dir(), legacy_v023_data_dir())
 
 
 def default_db_path() -> Path:
@@ -62,13 +75,22 @@ def default_model_path(name: str) -> Path:
 
 
 def migrate_legacy() -> bool:
-    """旧目录 → resolve_data_dir() 自动迁移；返回是否真的搬了。
+    """全部旧家目录 → resolve_data_dir() 自动迁移；返回是否有任一真搬。
 
     布局映射：旧根平铺的 memory.db(+sidecars) → <data>/data/；models/、
-    config.toml 等其余条目原位落新根。旧目录最终只留 MIGRATED 指针。
+    config.toml 等其余条目原位落新根。每个旧目录最终只留 MIGRATED 指针。
+    多个旧目录并存时老→新逐个尝试；前一个迁完导致新家非空时，其余按
+    既有护栏告警跳过（数据不动，等人工合并）——不因一处拒迁弃全盘。
     """
     data_dir = resolve_data_dir()
-    legacy = legacy_data_dir()
+    moved = False
+    for legacy in legacy_data_dirs():
+        moved = _migrate_one(data_dir, legacy) or moved
+    return moved
+
+
+def _migrate_one(data_dir: Path, legacy: Path) -> bool:
+    """单个旧目录迁移（硬约束与原 migrate_legacy 完全一致）。"""
     if _skip(data_dir, legacy):
         return False
     lock_path = legacy / _LOCK_NAME

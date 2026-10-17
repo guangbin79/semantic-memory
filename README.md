@@ -1,12 +1,9 @@
-> Repository rename pending: **semantic-memory-mcp → semantic-memory** — rename it in GitHub Settings, then run `git remote set-url origin git@github.com:guangbin79/semantic-memory.git`; old links redirect automatically.
-
 # semantic-memory
 
 **[English](README.md) | [中文](README.zh-CN.md)**
 
-> **Renamed** — this project was previously published as `semantic-memory-mcp`;
-> data from the old default home `~/.local/share/memory-mcp/` migrates automatically
-> on first start (see "The unified home" below).
+> Data from legacy homes (`~/.local/share/memory-mcp/` and v0.2's `~/semantic-memory-mcp/`)
+> migrates automatically on first start (see "The unified home" below).
 
 A **sidecar** for coding-agent context management: **model-semantic-level** context
 retrieval that keeps context relevance alive.
@@ -90,11 +87,11 @@ entirely and use the one-shot setup below.
 
 ### One-shot setup (probe → verified download → config → smoke)
 
-Humans, one curl (pinned to release tag v0.2.0):
+Humans, one curl (pinned to release tag v0.3.0):
 
 ```bash
 curl -fsSL \
-  https://raw.githubusercontent.com/guangbin79/semantic-memory-mcp/v0.2.0/scripts/setup.sh \
+  https://raw.githubusercontent.com/guangbin79/semantic-memory/v0.3.0/scripts/setup.sh \
   | bash -s -- --profile full --json --yes
 ```
 
@@ -104,16 +101,16 @@ Agents with the repo checked out:
 bash scripts/setup.sh --profile full --json --yes
 ```
 
-Both build a fully self-contained `~/semantic-memory-mcp/` (venv + sha256-verified
+Both build a fully self-contained `~/semantic-memory/` (venv + sha256-verified
 model downloads + `config.toml` + smoke test). `--profile` picks the tier:
 `full` (embed + distill + rerank, default) / `embed` / `bm25` (zero download). With
 `--json` the report is one machine-readable line; afterwards everything runs via
-`~/semantic-memory-mcp/venv/bin/semantic-memory …`.
+`~/semantic-memory/venv/bin/semantic-memory …`.
 
 ### Start the service
 
 ```bash
-semantic-memory serve    # or: ~/semantic-memory-mcp/venv/bin/semantic-memory serve
+semantic-memory serve    # or: ~/semantic-memory/venv/bin/semantic-memory serve
 # → http://127.0.0.1:8765  (REST API + web UI; MEMORY_PORT=0 = OS-assigned port)
 ```
 
@@ -141,19 +138,19 @@ cp integrations/opencode/memory.ts ~/.config/opencode/plugins/
 Every other harness is a thin "hook event → curl localhost:8765" shell adapter —
 see `integrations/README.md`.
 
-### The unified home: `~/semantic-memory-mcp/`
+### The unified home: `~/semantic-memory/`
 
 | Path | Contents |
 |---|---|
-| `~/semantic-memory-mcp/venv/` | self-contained virtualenv (one-shot setup) |
-| `~/semantic-memory-mcp/models/` | GGUF models (embedding / distiller / reranker) |
-| `~/semantic-memory-mcp/data/memory.db` | the SQLite store (default `MEMORY_DB_PATH`) |
-| `~/semantic-memory-mcp/config.toml` | file-config tier: env > this file > built-in defaults |
+| `~/semantic-memory/venv/` | self-contained virtualenv (one-shot setup) |
+| `~/semantic-memory/models/` | GGUF models (embedding / distiller / reranker) |
+| `~/semantic-memory/data/memory.db` | the SQLite store (default `MEMORY_DB_PATH`) |
+| `~/semantic-memory/config.toml` | file-config tier: env > this file > built-in defaults |
 
 Resolution order: `MEMORY_DATA_DIR` > explicit `XDG_DATA_HOME` (→
-`$XDG_DATA_HOME/memory-mcp/`) > `~/semantic-memory-mcp/`. **Legacy migration is
-automatic**: on first start, a pre-rename `~/.local/share/memory-mcp/` home is
-moved in — WAL-checkpointed first, sha256-verified per file, refused while a live
+`$XDG_DATA_HOME/memory-mcp/`) > `~/semantic-memory/`. **Legacy migration is
+automatic**: on first start, legacy homes (`~/.local/share/memory-mcp/`, v0.2's
+`~/semantic-memory-mcp/`) are moved in — WAL-checkpointed first, sha256-verified per file, refused while a live
 old instance holds it, and the old directory is left with a single `MIGRATED`
 pointer file. Idempotent; nothing is ever deleted unverified.
 
@@ -176,8 +173,8 @@ Service:
 
 | Variable | Default | Description |
 |---|---|---|
-| `MEMORY_DATA_DIR` | `~/semantic-memory-mcp/` (resolution: this env > explicit `XDG_DATA_HOME` → `$XDG_DATA_HOME/memory-mcp/` > default home) | Data home override: models/ data/ config.toml all live under it |
-| `MEMORY_DB_PATH` | `~/semantic-memory-mcp/data/memory.db` | Database path (only overrides the db; the rest of the home stays put) |
+| `MEMORY_DATA_DIR` | `~/semantic-memory/` (resolution: this env > explicit `XDG_DATA_HOME` → `$XDG_DATA_HOME/memory-mcp/` > default home) | Data home override: models/ data/ config.toml all live under it |
+| `MEMORY_DB_PATH` | `~/semantic-memory/data/memory.db` | Database path (only overrides the db; the rest of the home stays put) |
 | `MEMORY_MODEL_PATH` | empty | Embedding GGUF; empty = BM25-only fallback |
 | `MEMORY_DEVICE` | `cuda` | Embed device: `cuda` (default, auto-falls back to CPU) / `cpu` |
 | `MEMORY_EMBED_DIM` | `1024` | Embedding dimension |
@@ -189,7 +186,7 @@ Service:
 | `MEMORY_RECALL_MIN_COSINE` | `0.45` | Cosine floor for vector-only hits (BM25 hits always pass); `0` = off |
 | `MEMORY_RECALL_MAX_COSINE` | `0.92` | Redundancy ceiling: vector-only hits above this drop as redundant (BM25 unaffected); `1.0` = off |
 | `MEMORY_INJECT_BOOST` | `0.15` | Telemetry feedback: score × (1 + α·ln(1+injections)); `0` = off |
-| `MEMORY_RERANK_MODEL` | `~/semantic-memory-mcp/models/qwen3-reranker-0.6b-q8_0.gguf` | Reranker GGUF (**ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF only** — official conversion, community builds may lack the rank head); default = conventional path (gate PASSED 2026-10-16: recall@5 0.939 vs 0.909 baseline) — on when the file exists, graceful off + warning when missing; set empty to disable |
+| `MEMORY_RERANK_MODEL` | `~/semantic-memory/models/qwen3-reranker-0.6b-q8_0.gguf` | Reranker GGUF (**ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF only** — official conversion, community builds may lack the rank head); default = conventional path (gate PASSED 2026-10-16: recall@5 0.939 vs 0.909 baseline) — on when the file exists, graceful off + warning when missing; set empty to disable |
 | `MEMORY_RERANK_CANDIDATES` | `20` | Top-N RRF candidates fed to the reranker |
 | `MEMORY_RERANK_BUDGET_MS` | `500` | Total rerank budget per recall (incl. model-slot load); exceeded = fail-open to RRF order |
 
@@ -281,7 +278,7 @@ readers can still detect staleness via the embedded `pid`.
 ## Storage layout
 
 Everything lives in **one SQLite file** (`MEMORY_DB_PATH`, default
-`~/semantic-memory-mcp/data/memory.db`):
+`~/semantic-memory/data/memory.db`):
 
 | Object | Contents |
 |---|---|
@@ -558,10 +555,3 @@ line, and resolves the workspace as project — no load errors.
       cloud consolidation, usage-based retention, offline eval, observability
 - [ ] Phase 4: bigram channel for 2-char CJK terms (trigger: a real recall miss
       in BM25-only mode), cross-project memory graph, memory archive (cold file)
-
-## Acknowledgments
-
-Architecture inspired by [Basic Memory](https://github.com/basicmachines-co/basic-memory)
-(Markdown + SQLite FTS), [ctx-semantic](https://github.com/guangbin79/ctx-semantic)
-(BM25 + Qwen3-Embedding + RRF), and [context-mode](https://github.com/mksglu/context-mode)
-(hook-interception paradigm).
