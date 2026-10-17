@@ -58,7 +58,7 @@ BLOCK=$(echo "$RESP" | jq -r '
   end')
 
 [ -z "$BLOCK" ] && exit 0
-EMITTED=$(printf '%s' "$BLOCK" | head -c "$BUDGET")
+EMITTED=$(printf '%s' "$BLOCK" | jq -Rrs --argjson b "$BUDGET" '.[0:$b]')  # 按码点截断：head -c 会撕多字节 UTF-8
 printf '%s' "$EMITTED"
 
 # 注入遥测（fire-and-forget，不阻塞钩子回包）

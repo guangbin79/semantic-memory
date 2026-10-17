@@ -566,15 +566,24 @@ const headText = xev.system.map((s) => s.text).join("");
 assert.ok(!headText.includes("发布窗口固定在周三上午"), "task11 不变量：跨项目 preference 不得进入冻结头块");
 console.log("ok  跨项目图谱: 查 A 项目带出 B 项目同源解法（co_injection 标记渲染；跨项目 preference 不进头块）");
 
-// ---------- adapters：显式 remember 分支发 source=remember（grep 逐文件验证，预存在断言，主检上即红） ----------
+// ---------- adapters：remember 分支发 source=remember（grep 验证，2026-10-17 对齐现实） ----------
+// remember 分支已收敛到共享 common/hook-on-prompt.sh；两家薄壳只负责路由——
+// 断言＝「共享脚本含 remember→"remember" 分支」+「两薄壳均路由到共享钩子」。
 
+const g = execFileSync(
+  "bash",
+  ["-c", `grep -A2 'remember' '../common/hook-on-prompt.sh' | grep -F '"remember"' || true`],
+  { encoding: "utf8" },
+);
+assert.ok(g.includes('"remember"'), "共享 remember 分支未发 source=remember: ../common/hook-on-prompt.sh");
 for (const f of ["../claude-code/on-prompt.sh", "../kimi-code/on-prompt.sh"]) {
-  const g = execFileSync(
-    "bash", ["-c", `grep -A2 'remember' '${f}' | grep -F '"remember"' || true`],
+  const w = execFileSync(
+    "bash",
+    ["-c", `grep -F 'common/hook-on-prompt.sh' '${f}' || true`],
     { encoding: "utf8" },
   );
-  assert.ok(g.includes('"remember"'), `适配器 remember 分支未发 source=remember: ${f}`);
+  assert.ok(w.includes("common/hook-on-prompt.sh"), `薄壳未路由到共享钩子: ${f}`);
 }
-console.log("ok  适配器: claude-code/kimi-code on-prompt.sh remember 分支均发 source=remember");
+console.log("ok  适配器: 共享 remember 分支发 source=remember；claude-code/kimi-code 薄壳均路由共享钩子");
 
 console.log("\n全部 mock-ctx 钩子集成测试通过（stable + legacy 两线 + task11 头块/位置/键控 + options + task7 写入侧/idle + A4 原生工具 + 跨项目图谱）");
