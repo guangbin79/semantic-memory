@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .config import write_config
-from .paths import resolve_data_dir
+from .paths import MigrationRefused, migrate_legacy, resolve_data_dir
 
 # ---- 固定 sha256 常量表 ----
 # 蒸馏/重排：本机 ~/.local/share/memory-mcp/models/ 真件 sha256sum（与 HF
