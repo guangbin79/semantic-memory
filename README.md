@@ -87,11 +87,11 @@ entirely and use the one-shot setup below.
 
 ### One-shot setup (probe → verified download → config → smoke)
 
-Humans, one curl (pinned to release tag v0.3.0):
+Humans, one curl (pinned to release tag v1.0):
 
 ```bash
 curl -fsSL \
-  https://raw.githubusercontent.com/guangbin79/semantic-memory/v0.3.0/scripts/setup.sh \
+  https://raw.githubusercontent.com/guangbin79/semantic-memory/v1.0/scripts/setup.sh \
   | bash -s -- --profile full --json --yes
 ```
 

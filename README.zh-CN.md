@@ -70,11 +70,11 @@ localhost:8765"——只有 opencode v2 需要进程内插件，因为它的钩�
 
 ### 一键安装（探测 → 校验下载 → 写配置 → 冒烟）
 
-人，一条 curl（钉 release tag v0.3.0）：
+人，一条 curl（钉 release tag v1.0）：
 
 ```bash
 curl -fsSL \
-  https://raw.githubusercontent.com/guangbin79/semantic-memory/v0.3.0/scripts/setup.sh \
+  https://raw.githubusercontent.com/guangbin79/semantic-memory/v1.0/scripts/setup.sh \
   | bash -s -- --profile full --json --yes
 ```
 

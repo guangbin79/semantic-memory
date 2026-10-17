@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "semantic-memory"
-version = "0.3.0"
+version = "1.0.0"
 description = "Context-relevance sidecar for coding agents: model-semantic-level context retrieval (BM25 + vector + RRF) for opencode v2, with a thin v2 plugin for automatic recall/capture"
 readme = "README.md"
 requires-python = ">=3.11"

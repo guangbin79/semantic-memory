@@ -2,7 +2,7 @@
 # semantic-memory 一键自举（任务 10）：独立 venv → 装包 → 透传 setup 子命令。
 #
 # 人：curl -fsSL \
-#   https://raw.githubusercontent.com/guangbin79/semantic-memory/v0.3.0/scripts/setup.sh \
+#   https://raw.githubusercontent.com/guangbin79/semantic-memory/v1.0/scripts/setup.sh \
 #   | bash -s -- --profile full --json --yes
 # agent：bash scripts/setup.sh --profile full --json --yes
 #
@@ -12,7 +12,7 @@
 # stdout 纪律：本脚本一切杂讯走 stderr——--json 时 stdout 恰为 setup 的单行 JSON。
 set -euo pipefail
 
-TAG="v0.3.0"   # 钉 release tag；与 README curl 示例同源，升级 = 改这一处
+TAG="v1.0"   # 钉 release tag；与 README curl 示例同源，升级 = 改这一处
 REMOTE_SPEC="git+https://github.com/guangbin79/semantic-memory.git@${TAG}#egg=semantic-memory[embed]"
 
 # ---- TARGET 解析：--data-dir（两种写法）> MEMORY_DATA_DIR > XDG > ~/semantic-memory（与 paths.py 同构；~ 展开）----
