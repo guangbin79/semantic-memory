@@ -185,6 +185,9 @@ Service:
 | `MEMORY_RRF_K` | `60` | RRF fusion constant |
 | `MEMORY_RECALL_MIN_COSINE` | `0.45` | Cosine floor for vector-only hits (BM25 hits always pass); `0` = off |
 | `MEMORY_RECALL_MAX_COSINE` | `0.92` | Redundancy ceiling: vector-only hits above this drop as redundant (BM25 unaffected); `1.0` = off |
+| `MEMORY_CROSS_PROJECT` | `1` | Cross-project graph: append same-origin solutions from project B to project recalls; `=0` off |
+| `MEMORY_CROSS_LIMIT` | `2` | Cap on cross-project extras (never counted against the main quota) |
+| `MEMORY_CROSS_SIM` | `0.90` | Cosine threshold for cross-project synonym edges |
 | `MEMORY_INJECT_BOOST` | `0.15` | Telemetry feedback: score × (1 + α·ln(1+injections)); `0` = off |
 | `MEMORY_RERANK_MODEL` | `~/semantic-memory/models/qwen3-reranker-0.6b-q8_0.gguf` | Reranker GGUF (**ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF only** — official conversion, community builds may lack the rank head); default = conventional path (gate PASSED 2026-10-16: recall@5 0.939 vs 0.909 baseline) — on when the file exists, graceful off + warning when missing; set empty to disable |
 | `MEMORY_RERANK_CANDIDATES` | `20` | Top-N RRF candidates fed to the reranker |
@@ -313,6 +316,24 @@ interleaved writes pays zero SQLite vector reads.
   tool) but not which harness wrote the entry — add a `harness:<name>` tag when
   that query need actually arises.
 
+### Cross-project memory graph
+
+Querying project A surfaces same-origin solutions from project B. All three edge
+kinds derive query-side from existing data (no new tables, no write-path state):
+
+- **supersedes (replacement chain)**: `memories.superseded_by` pointers; predecessors
+  are read via the admin face — observable, never injected (superseded = outdated);
+  `GET /api/graph` walks the full chain.
+- **co_injection**: uids that shared an injection block (weight = co-injection count).
+- **synonym (cross-domain)**: cross-project nearest neighbors by brute-force cosine
+  over the full matrix (weight = cosine; absent in BM25-only mode, no vectors).
+
+`/recall` with a project appends extras after the main results (flagged
+`cross_kind`/`via_uid`, never counted against the quota, capped by
+`MEMORY_CROSS_LIMIT`, synonym first); the plugin renders a `(cross-project <kind>)`
+marker. Reported extras reinforce co_injection edges — a flywheel. Observability:
+`GET /api/graph?uid=` returns one entry's 1-hop edges (re-query with `to_uid` to traverse).
+
 ### Choosing the storage location
 
 `MEMORY_DB_PATH` is read at service startup (parent directories are
@@ -333,6 +354,7 @@ hook-facing `/recall` `/ingest`, same auth rule: Bearer when `MEMORY_TOKEN` is s
 | `GET /api/stats` | Totals, vectorized count, db size, embedder/device, injection summary |
 | `GET /api/memories?kind=&project=&limit=&offset=` | Paginated browse, newest-updated first |
 | `GET /api/injections?harness=&project=&limit=&offset=` | Injection telemetry, newest first |
+| `GET /api/graph?uid=&cross_sim=` | One entry's 1-hop graph edges (supersedes / co-injection / synonym, traversable observability) |
 | `POST /inject/report` | Injection telemetry report (plugin/adapter channel, append-only) |
 | `POST /idle` | Notify idle: flush the distill queue in a daemon thread (204 immediately, auth = /ingest) |
 | `DELETE /api/memories/{uid}` | Single-entry forget (same trust level as the CLI) |
@@ -524,7 +546,8 @@ pytest            # baseline 43: store / dual-channel recall / soft delete /
                   # + evolution suites: distill queue & typed-fact supersede /
                   # reranker & shared model slot / git-origin project keys /
                   # stale-usage retention / cloud consolidation (mock transport) /
-                  # offline eval / recall latency telemetry & throttled alerts
+                  # offline eval / recall latency telemetry & throttled alerts /
+                  # cross-project graph (three edges + recall extras)
 
 cd integrations/opencode
 npm install       # then:
@@ -553,5 +576,9 @@ line, and resolves the workspace as project — no load errors.
 - [x] Phase 3c: context-completion evolution — write-side distillation, local
       rerank + shared model slot, sub-final injection + frozen head block,
       cloud consolidation, usage-based retention, offline eval, observability
-- [ ] Phase 4: bigram channel for 2-char CJK terms (trigger: a real recall miss
-      in BM25-only mode), cross-project memory graph, memory archive (cold file)
+- [x] Phase 4a: cross-project memory graph — traversable supersedes / co-injection / synonym edges (`/recall` same-origin extras + `GET /api/graph`)
+- [ ] Phase 4b: bigram channel for 2-char CJK terms (trigger: a real recall miss in
+      BM25-only mode; the full profile has the vector backstop — not urgent)
+- [ ] Phase 4c: memory archive, cold file (deferred — preference/decision are never
+      deleted but SQLite TTL/purge retention already caps growth; revisit when the hot
+      set nears the ~50k brute-force cosine ceiling)

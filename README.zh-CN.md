@@ -166,6 +166,9 @@ wal_checkpoint，逐文件 sha256 校验，旧服务还在跑则拒迁，旧目�
 | `MEMORY_RRF_K` | `60` | RRF 融合常数 |
 | `MEMORY_RECALL_MIN_COSINE` | `0.45` | 纯向量命中的余弦门限（BM25 命中恒放行）；`0` = 关闭 |
 | `MEMORY_RECALL_MAX_COSINE` | `0.92` | 冗余上限：纯向量命中超过此值按冗余出局（BM25 不受影响）；`1.0` = 关闭 |
+| `MEMORY_CROSS_PROJECT` | `1` | 跨项目图谱：项目召回后追加 B 项目同源解法；`=0` 关闭 |
+| `MEMORY_CROSS_LIMIT` | `2` | 跨项目附加条目上限（不占主配额） |
+| `MEMORY_CROSS_SIM` | `0.90` | synonym 边的跨项目近邻余弦阈值 |
 | `MEMORY_INJECT_BOOST` | `0.15` | 遥测反哺：score × (1 + α·ln(1+注入次数))；`0` = 关闭 |
 | `MEMORY_RERANK_MODEL` | `~/semantic-memory/models/qwen3-reranker-0.6b-q8_0.gguf` | 重排 GGUF（**仅 ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF**——官方转换，社区镜像可能缺 rank 头）；默认指向常规路径（门禁 2026-10-16 PASSED：recall@5 0.939 vs 基线 0.909）——文件在即启用，缺失优雅关闭并告警；设空禁用 |
 
@@ -282,6 +285,20 @@ MEMORY_PORT=0 semantic-memory
 - **归因缺口**：`source` 记录来源类型（chat / compaction / tool），但不记录
   由哪个 harness 写入——出现该查询需求时加 `harness:<name>` 标签即可。
 
+### 跨项目记忆图谱
+
+查 A 项目能带出 B 项目的同源解法。三种边全部从既有数据查询侧派生（零新表、零写路径状态）：
+
+- **supersedes（取代链）**：`memories.superseded_by` 指针；前代经管理面读出，仅观测
+  不注入（被取代 = 过时）；`GET /api/graph` 链式遍历全链。
+- **co_injection（共注入）**：注入遥测里同块共现过的条目（权重 = 共注入次数）。
+- **synonym（同义跨域）**：全矩阵暴力余弦的跨项目近邻（权重 = 余弦；纯 BM25 无向量时缺席）。
+
+`/recall` 带项目时在主结果后追加附加条目（`cross_kind`/`via_uid` 标记，不占主配额，
+`MEMORY_CROSS_LIMIT` 截断，synonym 优先）；插件注入块渲染 `(cross-project <kind>)` 标记。
+附加条目被上报后自然加固 co_injection 边——飞轮。观测面：`GET /api/graph?uid=` 返回
+单条目 1-hop 边（以 `to_uid` 为种子再查即遍历）。
+
 ### 指定存储位置
 
 `MEMORY_DB_PATH` 在服务启动时读取（父目录自动创建）。一个库文件对应一个
@@ -301,6 +318,7 @@ MEMORY_PORT=0 semantic-memory
 | `GET /api/stats` | 总量、向量化数、库体积、嵌入通道/设备、注入统计 |
 | `GET /api/memories?kind=&project=&limit=&offset=` | 分页浏览，按更新时间倒序 |
 | `GET /api/injections?harness=&project=&limit=&offset=` | 注入遥测，按时间倒序 |
+| `GET /api/graph?uid=&cross_sim=` | 单条目 1-hop 图谱边（取代链/共注入/同义跨域，可遍历观测面） |
 | `POST /inject/report` | 注入遥测上报（插件/适配器信道，只追加） |
 | `POST /idle` | 通知空闲：daemon 线程排空蒸馏队列（立即 204，鉴权同 /ingest） |
 | `DELETE /api/memories/{uid}` | 单条遗忘（与 CLI 同信任级） |
@@ -459,7 +477,7 @@ pytest            # 基线 43 项：存储/双通道召回/软删除/RRF 数学/
                   # 真实模型向量端到端（MEMORY_MODEL_PATH 可选启用）
                   # + 演进套件：蒸馏队列与 typed-fact 取代 / 重排器与共享模型槽 /
                   # git-origin 项目键 / 使用度留存 / 云整合（mock 传输）/
-                  # 离线评测 / 召回延迟遥测与节流告警
+                  # 离线评测 / 召回延迟遥测与节流告警 / 跨项目图谱（三种边+召回附加）
 
 cd integrations/opencode
 npm install       # 然后：
@@ -485,6 +503,8 @@ npm test          # 构建 + mock-ctx 钩子断言（打真实服务；
       （启动钩子 + CLI，刻意不在 agent 工具面）
 - [x] 第三期c：上下文补全演进——写入侧蒸馏、本地重排 + 共享模型槽、
       次末位注入 + 冻结头块、云整合、使用度留存、离线评测、观测面
-- [ ] 第四期：两字中文词 bigram 通道（触发条件：纯 BM25 模式出现真实漏召回）、
-      跨项目记忆图谱、冷文件归档
+- [x] 第四期a：跨项目记忆图谱——取代链/共注入/同义跨域可遍历边（`/recall` 同源附加 + `GET /api/graph`）
+- [ ] 第四期b：两字中文词 bigram 通道（触发条件：纯 BM25 模式出现真实漏召回；全配有向量兜底，不急）
+- [ ] 第四期c：冷文件归档（缓建——preference/decision 永不删但 SQLite TTL/purge 留存已管增长；
+      热集接近 ~50k 暴力余弦上限时再启动）
 
