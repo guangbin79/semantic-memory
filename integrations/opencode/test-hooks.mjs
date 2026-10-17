@@ -530,7 +530,43 @@ try {
   globalThis.fetch = realFetch;
 }
 
-// ---------- adapters：显式 remember 分支发 source=remember（grep 逐文件验证） ----------
+// ---------- 跨项目图谱：查 A 项目带出 B 项目同源解法（co_injection 边） ----------
+// （置于 adapters 静态检查之前：该预存在断言在主检上即红，不阻塞功能段执行）
+// fixtures 刻意 token 不相交：cub/cup 不含查询 token，只能经共注入 extras 到达——
+// 这样 cross_kind 排除逻辑才真正承重（若含 token 则走 BM25 主路径绕过 extras 机制）。
+  // 新 ctx 恢复 inject_position=tail：上方 options 段已把模块级 cfg 永久改为 system。
+
+const xctx = makeCtx();
+  await plugin.server(xctx.ctx, { inject_position: "tail" });
+  const cua = (await post("/ingest", {
+  content: "跨项目图谱种子条目 qzhij9crossa", kind: "fact", source: "manual", project: PROJECT, tags: [],
+})).uid;
+const cub = (await post("/ingest", {
+  content: "网关 5xx 即熔断重试的降级预案", kind: "fact", source: "manual", project: "/tmp/mockproj-x", tags: [],
+})).uid;
+// 跨项目 preference：extras 保留原始 kind——不排除则会钻进冻结头块（task11 不变量）
+  const cup = (await post("/ingest", {
+  content: "发布窗口固定在周三上午十点", kind: "preference", source: "manual", project: "/tmp/mockproj-x", tags: [],
+})).uid;
+  await post("/inject/report", {
+  harness: "test", hook: "context", query: "qzhij9cross", uids: [cua, cub], chars: 64, project: PROJECT,
+});
+await post("/inject/report", {
+  harness: "test", hook: "context", query: "qzhij9cross", uids: [cua, cup], chars: 64, project: PROJECT,
+});
+  const xev = userEvent("qzhij9cross 种子条目", "s-cross");
+  await fire(xctx.hooks.session, "context", xev);
+const xblock = xev.messages.map((m) => String(m.content)).join("");
+assert.ok(xblock.includes("qzhij9crossa"), "主结果：A 项目种子条目进尾注");
+assert.ok(
+  xblock.includes("网关 5xx 即熔断重试的降级预案") && xblock.includes("(cross-project co_injection)"),
+  "跨项目附加：B 项目同源条目应以 cross-project 标记进尾注",
+);
+const headText = xev.system.map((s) => s.text).join("");
+assert.ok(!headText.includes("发布窗口固定在周三上午"), "task11 不变量：跨项目 preference 不得进入冻结头块");
+console.log("ok  跨项目图谱: 查 A 项目带出 B 项目同源解法（co_injection 标记渲染；跨项目 preference 不进头块）");
+
+// ---------- adapters：显式 remember 分支发 source=remember（grep 逐文件验证，预存在断言，主检上即红） ----------
 
 for (const f of ["../claude-code/on-prompt.sh", "../kimi-code/on-prompt.sh"]) {
   const g = execFileSync(
@@ -540,26 +576,5 @@ for (const f of ["../claude-code/on-prompt.sh", "../kimi-code/on-prompt.sh"]) {
   assert.ok(g.includes('"remember"'), `适配器 remember 分支未发 source=remember: ${f}`);
 }
 console.log("ok  适配器: claude-code/kimi-code on-prompt.sh remember 分支均发 source=remember");
-
-// ---------- 跨项目图谱：查 A 项目带出 B 项目同源解法（co_injection 边） ----------
-
-const cua = (await post("/ingest", {
-  content: "跨项目图谱种子条目 qzhij9crossa", kind: "fact", source: "manual", project: PROJECT, tags: [],
-})).uid;
-const cub = (await post("/ingest", {
-  content: "跨项目同源解法条目 qzhij9crossb", kind: "fact", source: "manual", project: "/tmp/mockproj-x", tags: [],
-})).uid;
-await post("/inject/report", {
-  harness: "test", hook: "context", query: "qzhij9cross", uids: [cua, cub], chars: 64, project: PROJECT,
-});
-const xev = userEvent("qzhij9cross 种子条目", "s-cross");
-await fire(hooks.session, "context", xev);
-const xblock = String(xev.messages[0].content);
-assert.ok(xblock.includes("qzhij9crossa"), "主结果：A 项目种子条目进尾注");
-assert.ok(
-  xblock.includes("qzhij9crossb") && xblock.includes("(cross-project co_injection)"),
-  "跨项目附加：B 项目同源条目应以 cross-project 标记进尾注",
-);
-console.log("ok  跨项目图谱: 查 A 项目带出 B 项目同源解法（co_injection 标记渲染）");
 
 console.log("\n全部 mock-ctx 钩子集成测试通过（stable + legacy 两线 + task11 头块/位置/键控 + options + task7 写入侧/idle + A4 原生工具 + 跨项目图谱）");

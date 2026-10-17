@@ -380,7 +380,9 @@ async function buildHeadBlock(query: string, project: string | undefined): Promi
   const hits = await recallHits(query, 20, project);
   if (!hits) return undefined;
   const head = hits
-    .filter((h) => h.kind === "preference" || h.kind === "decision")
+    // 排除跨项目附加条目：extras 保留目标行原始 kind（可为 preference/decision）
+    // 且带真实注入计数，不排除则他项目偏好可钉进整会话的冻结头块（task11 不变量）
+    .filter((h) => !h.cross_kind && (h.kind === "preference" || h.kind === "decision"))
     .sort(
       (a, b) =>
         Number(b.injections ?? 0) - Number(a.injections ?? 0) ||
