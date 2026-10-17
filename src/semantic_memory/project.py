@@ -14,6 +14,7 @@ from .db import MemoryStore
 
 # 进程内缓存：含回退结果——非 git 目录反复 spawn git 是纯浪费。
 _CACHE: dict[str, str] = {}
+_CACHE_MAX = 512  # 封顶：防畸形路径洪灌内存（2026-10-17 硬化；含回退结果）
 
 
 def normalize_git_url(url: str) -> str:
@@ -58,6 +59,8 @@ def resolve_project(path: str | None) -> str | None:
             resolved = normalize_git_url(r.stdout.strip())
     except (OSError, subprocess.TimeoutExpired):
         pass  # git 不存在 / 目录不存在 / 超时 → 原 path
+    if len(_CACHE) >= _CACHE_MAX:
+        _CACHE.clear()  # ponytail: 粗粒度全清——键是路径、收益是防无界增长，不值得 LRU 复杂度
     _CACHE[path] = resolved
     return resolved
 

@@ -239,22 +239,42 @@ def api_stats() -> dict:
     return out
 
 
-def api_injections(q: dict) -> dict:
+def _qint(q: dict, key: str, default: int, cap: int | None = None) -> int | None:
+    """GET 查询参数整数解析：非法 → None（调用方回 400 而非 500）。"""
+    raw = q.get(key)
+    if raw is None:
+        return default
+    try:
+        v = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return min(v, cap) if cap is not None else v
+
+
+def api_injections(q: dict) -> dict | tuple[int, dict]:
+    limit = _qint(q, "limit", 50, 200)
+    offset = _qint(q, "offset", 0)
+    if limit is None or offset is None:
+        return 400, {"error": "limit/offset must be integers"}
     rows = store.list_injections(
         harness=q.get("harness") or None,
         project=q.get("project") or None,
-        limit=min(int(q.get("limit", 50)), 200),
-        offset=int(q.get("offset", 0)),
+        limit=limit,
+        offset=offset,
     )
     return {"injections": rows}
 
 
-def api_memories(q: dict) -> dict:
+def api_memories(q: dict) -> dict | tuple[int, dict]:
+    limit = _qint(q, "limit", 50, 200)
+    offset = _qint(q, "offset", 0)
+    if limit is None or offset is None:
+        return 400, {"error": "limit/offset must be integers"}
     rows = store.list_recent(
         project=q.get("project") or None,
         kind=q.get("kind") or None,
-        limit=min(int(q.get("limit", 50)), 200),
-        offset=int(q.get("offset", 0)),
+        limit=limit,
+        offset=offset,
     )
     return {"memories": [
         {"uid": r["uid"], "content": r["content"], "kind": r["kind"],
@@ -318,13 +338,23 @@ def api_maintenance_backfill() -> dict:
     return backfill_vectors(store, embedder)
 
 
-def rest_recall(body: dict) -> dict:
+def rest_recall(body: dict) -> dict | tuple[int, dict]:
+    q = body.get("query")
+    if not isinstance(q, str):
+        return 400, {"error": "query must be a string"}
+    if not q.strip():
+        return {"hits": []}  # 既有契约：空查询 → 空 hits（见 test_recall_empty_query）
+    try:
+        limit = int(body.get("limit", cfg.recall_limit_default))
+        global_limit = int(body.get("global_limit", 0))
+    except (TypeError, ValueError):
+        return 400, {"error": "limit/global_limit must be integers"}
     t0 = time.perf_counter()
     hits = _recall_hits(
-        query=body["query"],
-        limit=int(body.get("limit", cfg.recall_limit_default)),
+        query=q,
+        limit=limit,
         project=resolve_project(body.get("project")),
-        global_limit=int(body.get("global_limit", 0)),
+        global_limit=global_limit,
     )
     _record_recall((time.perf_counter() - t0) * 1000.0)
     return {"hits": hits}
@@ -351,9 +381,12 @@ def _spawn_flush() -> None:
     threading.Thread(target=_run, daemon=True, name="distill-flush").start()
 
 
-def rest_ingest(body: dict) -> dict:
+def rest_ingest(body: dict) -> dict | tuple[int, dict]:
     source = body.get("source", "chat")
-    project = resolve_project(body.get("project"))
+    raw_project = body.get("project")
+    if raw_project is not None and not isinstance(raw_project, str):
+        return 400, {"error": "project must be a string"}
+    project = resolve_project(raw_project)
     if source in QUEUED_SOURCES:
         pending = enqueue_raw(store, body["content"], source, project,
                               body.get("session_id"))
@@ -382,6 +415,7 @@ def inject_report(body: dict) -> tuple[int, dict]:
     uids = body.get("uids")
     if not isinstance(uids, list) or not all(isinstance(u, str) for u in uids):
         return 400, {"error": "uids must be a string array"}
+    uids = uids[:50]  # 截断：防超长列表打爆 stamp_recalled 的 SQL 变量上限（与存储侧 trim 同语义）
     try:
         chars = int(body.get("chars", 0))
     except (TypeError, ValueError):
@@ -508,8 +542,14 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:  # noqa: N802
         self._dispatch("DELETE")
 
+    def _send_h(self, r: dict | tuple[int, dict]) -> None:
+        """handler 结果发送：元组 (status, payload) 或裸 dict（200）。"""
+        status, payload = r if isinstance(r, tuple) else (200, r)
+        self._send_json(payload, status)
+
     def _dispatch(self, method: str) -> None:
         try:
+            init_core()  # 首请求即物化单例：单文件/独立运行测试无需先触模块属性
             self._route(method)
         except (BrokenPipeError, ConnectionResetError):
             self.close_connection = True  # 客户端已走：异常不得外泄为噪音
@@ -541,15 +581,15 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             if path == "/api/injections":
                 if not _authorized(self.headers):
                     return self._send_json({"error": "unauthorized"}, 401)
-                return self._send_json(api_injections(q))
+                return self._send_h(api_injections(q))
             if path == "/api/memories":
                 if not _authorized(self.headers):
                     return self._send_json({"error": "unauthorized"}, 401)
-                return self._send_json(api_memories(q))
+                return self._send_h(api_memories(q))
             if path == "/api/graph":
                 if not _authorized(self.headers):
                     return self._send_json({"error": "unauthorized"}, 401)
-                return self._send_json(api_graph(q))
+                return self._send_h(api_graph(q))
             return self._send_json({"error": "not found"}, 404)
 
         if method == "DELETE":
@@ -589,9 +629,9 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
                     return self._send_json({"error": "invalid JSON body"}, 400)
                 if path == "/recall":
-                    return self._send_json(rest_recall(parsed))
+                    return self._send_h(rest_recall(parsed))
                 if path == "/ingest":
-                    return self._send_json(rest_ingest(parsed))
+                    return self._send_h(rest_ingest(parsed))
                 if path == "/inject/report":
                     status, payload = inject_report(parsed)
                     return self._send_json(payload, status)
