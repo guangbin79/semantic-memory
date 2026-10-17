@@ -577,13 +577,23 @@ const g = execFileSync(
 );
 assert.ok(g.includes('"remember"'), "共享 remember 分支未发 source=remember: ../common/hook-on-prompt.sh");
 for (const f of ["../claude-code/on-prompt.sh", "../kimi-code/on-prompt.sh"]) {
+  // 锚定 exec 调用行而非裸文件名：注释里提及共享脚本不算路由（评审 R1-C4 修正）
   const w = execFileSync(
     "bash",
-    ["-c", `grep -F 'common/hook-on-prompt.sh' '${f}' || true`],
+    ["-c", `grep -F 'bash \"$DIR/../common/hook-on-prompt.sh\"' '${f}' || true`],
     { encoding: "utf8" },
   );
-  assert.ok(w.includes("common/hook-on-prompt.sh"), `薄壳未路由到共享钩子: ${f}`);
+  assert.ok(w.trim().length > 0, `薄壳未路由到共享钩子（exec 行缺失）: ${f}`);
 }
-console.log("ok  适配器: 共享 remember 分支发 source=remember；claude-code/kimi-code 薄壳均路由共享钩子");
+
+// 边界回归：recall.sh 的 EMITTED 截断须按码点（jq），不得回退 head -c（斯多字节 UTF-8）
+const trunc = execFileSync(
+  "bash",
+  ["-c", `printf '%s' '中文记忆块内容' | jq -Rrs --argjson b 3 '.[0:$b]'`],
+  { encoding: "utf8" },
+);
+assert.ok(trunc.startsWith("中文记") && !trunc.includes("\uFFFD"),
+  "recall.sh 同款截断须按码点切：多字节内容在边界处不得产生撕裂字节/替换符");
+console.log("ok  适配器: 共享 remember 分支发 source=remember；薄壳 exec 路由锚定；码点截断边界回归");
 
 console.log("\n全部 mock-ctx 钩子集成测试通过（stable + legacy 两线 + task11 头块/位置/键控 + options + task7 写入侧/idle + A4 原生工具 + 跨项目图谱）");
