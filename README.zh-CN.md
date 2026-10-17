@@ -140,6 +140,9 @@ wal_checkpoint，逐文件 sha256 校验，旧服务还在跑则拒迁，旧目�
 
 服务拒绝半配置启动（宁可大声失败，不要静默降级）：
 
+- **非回环绑定且未配 `MEMORY_TOKEN`** → 拒启 `exit 2`（契约 enforced：无 token 的
+  REST 面会把读/写/单条遗忘裸暴露给网络；`MEMORY_ALLOW_BM25_ONLY` 不豁免——
+  那只管模型档）。
 - **全未配置、无 `config.toml`** → 招募模式：纯 BM25 合法运行，附指向
   `semantic-memory setup` 的安装提示。
 - **已配置（env 或 `config.toml`）但模型文件缺失** → 拒启 `exit 2`，指明缺失
@@ -161,7 +164,7 @@ wal_checkpoint，逐文件 sha256 校验，旧服务还在跑则拒迁，旧目�
 | `MEMORY_EMBED_DIM` | `1024` | 嵌入维度 |
 | `MEMORY_HOST` / `MEMORY_PORT` | `127.0.0.1` / `8765` | 绑定地址；端口 `0` = OS 随机分配 |
 | `MEMORY_DISCOVERY_FILE` | `<db>.server.json` | 服务发现文件；`off` = 关闭 |
-| `MEMORY_TOKEN` | 空 | HTTP API 的 Bearer 鉴权；绑非回环地址时**必配** |
+| `MEMORY_TOKEN` | 空 | HTTP API 的 Bearer 鉴权；绑非回环地址时**必配**（否则启动即拒 exit 2） |
 | `MEMORY_RECALL_LIMIT` | `5` | 请求未带 limit 时的默认召回条数 |
 | `MEMORY_RRF_K` | `60` | RRF 融合常数 |
 | `MEMORY_RECALL_MIN_COSINE` | `0.45` | 纯向量命中的余弦门限（BM25 命中恒放行）；`0` = 关闭 |

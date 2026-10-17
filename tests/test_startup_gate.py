@@ -122,3 +122,37 @@ def test_main_recruitment_reaches_serve(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "serve", lambda: None)   # 起服被替换为无操作标记
     monkeypatch.setattr(sys, "argv", ["semantic-memory"])
     server.main()                                        # 不抛 SystemExit 即放行
+
+
+# ---------------- 绑定安全门（M-1，2026-10-17 用户确认修） ----------------
+# README 契约：非回环绑定必须配 MEMORY_TOKEN；此前仅告警不拒启（R2 安全发现）
+
+def test_nonloopback_bind_without_token_refuses(monkeypatch, tmp_path):
+    clean_env(monkeypatch, tmp_path)
+    cfg = replace(Config.from_env(), host="0.0.0.0", token=None)
+    code, err = gate(cfg)
+    assert code == 2 and "MEMORY_TOKEN" in err
+
+
+def test_nonloopback_bind_with_token_passes(monkeypatch, tmp_path):
+    clean_env(monkeypatch, tmp_path)
+    cfg = replace(Config.from_env(), host="0.0.0.0", token="secret")
+    code, err = gate(cfg)
+    assert code == 0 and err == ""
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "::1", "127.3.2.1"])
+def test_loopback_bind_variants_without_token_pass(monkeypatch, tmp_path, host):
+    clean_env(monkeypatch, tmp_path)
+    cfg = replace(Config.from_env(), host=host, token=None)
+    code, err = gate(cfg)
+    assert code == 0 and err == ""
+
+
+def test_bind_gate_not_bypassed_by_allow_bm25_only(monkeypatch, tmp_path):
+    """allow_bm25_only 只管模型档，不豁免网络暴露面。"""
+    clean_env(monkeypatch, tmp_path)
+    cfg = replace(Config.from_env(), host="192.168.1.10", token=None,
+                  allow_bm25_only=True)
+    code, err = gate(cfg)
+    assert code == 2 and "MEMORY_TOKEN" in err

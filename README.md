@@ -159,6 +159,9 @@ pointer file. Idempotent; nothing is ever deleted unverified.
 The service refuses to start half-configured (fail loudly instead of silently
 degraded):
 
+- **Non-loopback bind without `MEMORY_TOKEN`** → refused with `exit 2` (enforced
+  contract: the tokenless REST surface exposes read/ingest/forget to the network;
+  not bypassed by `MEMORY_ALLOW_BM25_ONLY` — that hatch covers model tiers only).
 - **Nothing configured, no `config.toml`** → recruit mode: BM25-only runs legally,
   with an install hint pointing at `semantic-memory setup`.
 - **Configured (env or `config.toml`) but the model file is missing** → refused with
@@ -180,7 +183,7 @@ Service:
 | `MEMORY_EMBED_DIM` | `1024` | Embedding dimension |
 | `MEMORY_HOST` / `MEMORY_PORT` | `127.0.0.1` / `8765` | Bind address; port `0` = OS-assigned random port |
 | `MEMORY_DISCOVERY_FILE` | `<db>.server.json` | Service-discovery file; `off` = disabled |
-| `MEMORY_TOKEN` | empty | Bearer auth for the HTTP API; **required** when binding non-loopback |
+| `MEMORY_TOKEN` | empty | Bearer auth for the HTTP API; **required** when binding non-loopback (startup-refused with `exit 2` otherwise) |
 | `MEMORY_RECALL_LIMIT` | `5` | Default recall limit when a request omits it |
 | `MEMORY_RRF_K` | `60` | RRF fusion constant |
 | `MEMORY_RECALL_MIN_COSINE` | `0.45` | Cosine floor for vector-only hits (BM25 hits always pass); `0` = off |

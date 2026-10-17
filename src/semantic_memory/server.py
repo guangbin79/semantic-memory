@@ -923,8 +923,7 @@ def main() -> None:
     log.info("db=%s embedder=%s prefer=%s", cfg.db_path, embedder.available, cfg.device)
     if not HAS_NUMPY:
         log.info("numpy 未安装——向量通道关闭（纯 BM25）。%s", INSTALL_HINT)
-    if cfg.token is None and cfg.host != "127.0.0.1":
-        log.warning("MEMORY_TOKEN 未设置且绑定非回环地址 %s，REST 侧车无鉴权！", cfg.host)
+    # 非回环无 token 的拒启在 startup_gate（check_startup 先于此执行）；此处不再重复告警
     # MEMORY_PORT=0 → OS 分配临时端口，绑定后通过发现文件/stdout 发布真实地址
     serve()
 
