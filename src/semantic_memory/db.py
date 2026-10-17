@@ -550,6 +550,32 @@ class MemoryStore:
         self._vec_cache[key] = (uids, mat, dv, gen)
         return uids, mat
 
+    # ---------- 跨项目图谱边源（查询侧派生边；编排见 graph.py） ----------
+
+    def supersede_predecessors(self, uids: list[str]) -> list[sqlite3.Row]:
+        """被这些 uid 直接取代的前代（管理面读：含被取代条目，召回面不可见）。"""
+        if not uids:
+            return []
+        marks = ",".join("?" * len(uids))
+        return self.conn.execute(
+            f"SELECT uid, content, kind, project, superseded_by FROM memories"
+            f" WHERE superseded_by IN ({marks}) AND deleted = 0 ORDER BY uid",
+            uids,
+        ).fetchall()
+
+    def co_injection_counts(self, seed_uids: list[str], limit: int = 20) -> list[sqlite3.Row]:
+        """与种子同 injections 行共现过的其他 uid：返回 (to_uid, via_uid, c=共现行数)。"""
+        if not seed_uids:
+            return []
+        marks = ",".join("?" * len(seed_uids))
+        return self.conn.execute(
+            f"SELECT j2.value AS to_uid, MIN(j1.value) AS via_uid, COUNT(DISTINCT i.id) AS c"
+            f" FROM injections i, json_each(i.uids) j1, json_each(i.uids) j2"
+            f" WHERE j1.value IN ({marks}) AND j2.value NOT IN ({marks})"
+            f" GROUP BY j2.value ORDER BY c DESC, to_uid LIMIT ?",
+            (*seed_uids, *seed_uids, limit),
+        ).fetchall()
+
     def get_many(self, uids: list[str]) -> list[sqlite3.Row]:
         if not uids:
             return []

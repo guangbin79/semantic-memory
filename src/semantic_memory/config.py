@@ -77,6 +77,10 @@ class Config:
     inject_boost: float        # 遥测反哺强度：score × (1 + α·ln(1+注入次数))；0 = 关闭
     recall_min_cosine: float   # 纯向量命中（无 BM25 支持）的余弦门限；0 = 关闭
     recall_max_cosine: float   # 冗余上限：纯向量命中 cos 高于此值出局（过近=冗余）；1.0 = 关闭
+    # ---- 跨项目图谱（查询侧派生边：取代链/共注入/同义跨域；见 graph.py）----
+    cross_project: bool       # MEMORY_CROSS_PROJECT=0 关闭（默认开）
+    cross_limit: int          # /recall 项目查询追加的跨项目条目上限（不占主配额）
+    cross_sim: float          # synonym 边的跨项目近邻余弦阈值
     # ---- 生命周期维护（调用面：启动钩子 + CLI，刻意不在 MCP 工具面）----
     ttl_artifact_days: int     # artifact 类 TTL；0 = 不过期
     ttl_injection_days: int    # 注入遥测 TTL；0 = 不过期
@@ -169,6 +173,11 @@ class Config:
             inject_boost=float(s("MEMORY_INJECT_BOOST", "inject_boost", "0.15")),
             recall_min_cosine=float(s("MEMORY_RECALL_MIN_COSINE", "recall_min_cosine", "0.45")),
             recall_max_cosine=float(s("MEMORY_RECALL_MAX_COSINE", "recall_max_cosine", "0.92")),
+            cross_project=_bool(
+                "MEMORY_CROSS_PROJECT", "cross_project",
+                True, lambda v: v != "0"),
+            cross_limit=int(s("MEMORY_CROSS_LIMIT", "cross_limit", "2")),
+            cross_sim=float(s("MEMORY_CROSS_SIM", "cross_sim", "0.90")),
             ttl_artifact_days=int(s("MEMORY_TTL_ARTIFACT_DAYS", "ttl_artifact_days", "90")),
             ttl_injection_days=int(s("MEMORY_TTL_INJECTION_DAYS", "ttl_injection_days", "90")),
             ttl_stale_days=int(s("MEMORY_TTL_STALE_DAYS", "ttl_stale_days", "180")),
