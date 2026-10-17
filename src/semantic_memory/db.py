@@ -564,16 +564,20 @@ class MemoryStore:
         ).fetchall()
 
     def co_injection_counts(self, seed_uids: list[str], limit: int = 20) -> list[sqlite3.Row]:
-        """与种子同 injections 行共现过的其他 uid：返回 (to_uid, via_uid, c=共现行数)。"""
+        """与种子同 injections 行共现过的其他 uid：返回 (to_uid, via_uid, c=共现行数)。
+
+        只看近 30 天遥测（骑 idx_injections_ts 有界扫）——全表双重 json_each 在
+        召回热路径不可接受，与 injection_counts 的计数列化同一取舍（见其注释）。
+        """
         if not seed_uids:
             return []
         marks = ",".join("?" * len(seed_uids))
         return self.conn.execute(
             f"SELECT j2.value AS to_uid, MIN(j1.value) AS via_uid, COUNT(DISTINCT i.id) AS c"
             f" FROM injections i, json_each(i.uids) j1, json_each(i.uids) j2"
-            f" WHERE j1.value IN ({marks}) AND j2.value NOT IN ({marks})"
+            f" WHERE i.ts > ? AND j1.value IN ({marks}) AND j2.value NOT IN ({marks})"
             f" GROUP BY j2.value ORDER BY c DESC, to_uid LIMIT ?",
-            (*seed_uids, *seed_uids, limit),
+            (time.time() - 30 * 86400, *seed_uids, *seed_uids, limit),
         ).fetchall()
 
     def get_many(self, uids: list[str]) -> list[sqlite3.Row]:

@@ -13,6 +13,11 @@ from .db import MemoryStore
 
 EDGE_KIND_ORDER = ("supersedes", "co_injection", "synonym")
 _LIVE_EDGE_KINDS = ("co_injection", "synonym")  # 可进注入面的边；前代已被取代，仅观测面
+# 种子封顶（三轮通用）：/recall 的 limit 客户端可控且未设上限，不封顶则逐种子
+# matvec+argsort 放大热路径成本（~50k 规模单种子≈4ms，16≈64ms 内）；
+# ponytail: 超过 16 个种子的边信号边际价值≈0（extras 本就被 cross_limit 截断），
+# 真需要更大种子面时改 argpartition 或调大此值
+_MAX_SEEDS = 16
 
 
 def graph_edges(store: MemoryStore, seed_uids: list[str], *,
@@ -23,7 +28,7 @@ def graph_edges(store: MemoryStore, seed_uids: list[str], *,
     supersedes 的 to_row 为管理面行（被取代者仍可读内容/项目）；co_injection/synonym
     邻居仅取活面（get_many），死亡（被取代/已删除/无行）邻居直接落边。
     """
-    seeds = list(dict.fromkeys(u for u in seed_uids if u))
+    seeds = list(dict.fromkeys(u for u in seed_uids if u))[:_MAX_SEEDS]
     if not seeds:
         return []
 

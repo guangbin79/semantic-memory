@@ -75,6 +75,16 @@ def test_co_injection_edge_with_count_and_via(store):
     assert all(e["to_uid"] != noise for e in co)
 
 
+def test_co_injection_window_30d(store):
+    """老于 30 天的注入遥测不产生共注入边（热路径有界扫的行为面）。"""
+    ua = store.store("窗口种子条目", project="pa")
+    ub = store.store("窗口邻居条目", project="pb")
+    store.record_injection("t", "context", "q", [ua, ub], 10, project="pa",
+                           ts=time.time() - 40 * 86400)
+    edges = graph.graph_edges(store, [ua])
+    assert all(e["kind"] != "co_injection" for e in edges)
+
+
 def test_co_injection_dead_neighbor_dropped(store):
     ua = store.store("A 项目条目", project="pa")
     ub = store.store("将被取代的 B 条目", project="pb")
@@ -106,6 +116,17 @@ def test_synonym_edge_cross_project_only_for_extras(store):
     e0 = extras[0]
     assert e0["cross_kind"] == "synonym" and e0["via_uid"] == ua
     assert e0["project"] == "pb" and e0["content"] == "B 项目同源解法：分块重试变体"
+
+
+@pytest.mark.skipif(np is None, reason="numpy 缺席时 synonym 边按设计缺席")
+def test_seed_cap_16_bounds_hot_path(store):
+    """种子封顶：第 17 个及以后的种子不再产生 synonym 边（/recall limit 客户端可控）。"""
+    vec = _unit([1.0, 0.0, 0.0, 0.0])
+    seeds = [store.store(f"同源条目 {i}", project=f"p{i % 3}", embedding=vec)
+             for i in range(20)]
+    edges = graph.graph_edges(store, seeds, cross_sim=0.90)
+    syn_from = {e["from_uid"] for e in edges if e["kind"] == "synonym"}
+    assert syn_from and syn_from <= set(seeds[:16])
 
 
 @pytest.mark.skipif(np is None, reason="numpy 缺席时 synonym 边按设计缺席")

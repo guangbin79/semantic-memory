@@ -432,6 +432,9 @@ def test_api_graph_endpoint(client):
     """GET /api/graph?uid= 可遍历三种边（观测面，管理面含被取代前代）。"""
     r = client.get("/api/graph", params={"uid": "nonexistent"})
     assert r.status_code == 200 and r.json()["edges"] == []
+    # cross_sim=nan：float() 能过但会令阈值比较恒 False——必须回落默认而非静默关掉阈值
+    r2 = client.get("/api/graph", params={"uid": "nonexistent", "cross_sim": "nan"})
+    assert r2.status_code == 200 and r2.json()["edges"] == []
     # 取代链：旧→新，从新条目可查到前代
     old = client.post("/ingest", json={"content": "图谱旧版条目 XG9", "source": "test", "project": "cross-a"}).json()["uid"]
     new = client.post("/ingest", json={"content": "图谱新版条目 XG10", "source": "test", "project": "cross-a"}).json()["uid"]

@@ -200,7 +200,7 @@ def _recall_hits(query: str, limit: int, project: str | None, global_limit: int)
             reranker=reranker, rerank_candidates=cfg.rerank_candidates,
         )
     # 跨项目图谱：主结果后追加同源解法（不占主配额；全局域走上面的两路召回）
-    if project and cfg.cross_project and merged:
+    if project and cfg.cross_project and cfg.cross_limit > 0 and merged:
         seen = {h["uid"] for h in merged}
         merged += [e for e in cross_project_extras(
             store, merged, project=project,
@@ -278,6 +278,8 @@ def api_graph(q: dict) -> dict:
         sim = float(q.get("cross_sim", cfg.cross_sim))
     except (TypeError, ValueError):
         sim = cfg.cross_sim
+    if not math.isfinite(sim):
+        sim = cfg.cross_sim  # nan/inf 能过 float() 却令阈值比较恒 False，静默关掉阈值——回落默认
     return {
         "uid": uid, "project": row["project"],
         "edges": [
