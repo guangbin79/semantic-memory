@@ -291,7 +291,7 @@ MEMORY_PORT=0 semantic-memory
 
 - **supersedes（取代链）**：`memories.superseded_by` 指针；前代经管理面读出，仅观测
   不注入（被取代 = 过时）；`GET /api/graph` 链式遍历全链。
-- **co_injection（共注入）**：注入遥测里同块共现过的条目（权重 = 共注入次数）。
+- **co_injection（共注入）**：注入遥测里同块共现过的条目（权重 = 共注入次数；只看近 30 天遥测，骑 idx_injections_ts 有界扫）。
 - **synonym（同义跨域）**：全矩阵暴力余弦的跨项目近邻（权重 = 余弦；纯 BM25 无向量时缺席）。
 
 `/recall` 带项目时在主结果后追加附加条目（`cross_kind`/`via_uid` 标记，不占主配额，

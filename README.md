@@ -324,7 +324,7 @@ kinds derive query-side from existing data (no new tables, no write-path state):
 - **supersedes (replacement chain)**: `memories.superseded_by` pointers; predecessors
   are read via the admin face — observable, never injected (superseded = outdated);
   `GET /api/graph` walks the full chain.
-- **co_injection**: uids that shared an injection block (weight = co-injection count).
+- **co_injection**: uids that shared an injection block (weight = co-injection count; last 30 days of telemetry only — a bounded scan riding idx_injections_ts).
 - **synonym (cross-domain)**: cross-project nearest neighbors by brute-force cosine
   over the full matrix (weight = cosine; absent in BM25-only mode, no vectors).
 
