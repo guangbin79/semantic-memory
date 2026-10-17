@@ -282,8 +282,9 @@ MEMORY_PORT=0 semantic-memory
 - **跨 harness**：opencode v2、Claude Code、Kimi Code、Codex 都连同一个服务，
   即**同一份索引**——Claude Code 存的记忆在 opencode 里可召回。换 harness
   不丢记忆；没有第二份拷贝需要同步。
-- **project 是过滤器，不是隔离墙**：索引全局唯一；插件注入时按当前项目过滤，
-  但 `memory_recall` 不传 project 就是全库检索。
+- **project 是过滤器，不是隔离墙**：索引全局唯一；项目域召回在服务端两腿（BM25 与向量）
+  都做 project 等值过滤（2026-10-17 起 BM25 腿对齐向量腿），但 `memory_recall` 不传 project
+  就是全库检索；跨项目同源解法另走图谱附加条目（显式标记，不冒充本项目命中）。
 - **单用户单机**：回环绑定 + 可选 Bearer token，无多租户。
 - **归因缺口**：`source` 记录来源类型（chat / compaction / tool），但不记录
   由哪个 harness 写入——出现该查询需求时加 `harness:<name>` 标签即可。
@@ -481,6 +482,7 @@ pytest            # 基线 43 项：存储/双通道召回/软删除/RRF 数学/
                   # + 演进套件：蒸馏队列与 typed-fact 取代 / 重排器与共享模型槽 /
                   # git-origin 项目键 / 使用度留存 / 云整合（mock 传输）/
                   # 离线评测 / 召回延迟遥测与节流告警 / 跨项目图谱（三种边+召回附加）
+                  # HTTP 硬化（项目域 BM25 等值过滤/畸形参数 400/uids 截断/单文件可跑）
 
 cd integrations/opencode
 npm install       # 然后：

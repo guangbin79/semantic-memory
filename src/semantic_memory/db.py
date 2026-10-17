@@ -454,11 +454,14 @@ class MemoryStore:
             return ""
         raise ValueError(f"invalid scope {scope!r}, expected 'all'|'project'|'global'")
 
-    def fts_search(self, query: str, limit: int, scope: str = "all") -> list[tuple[str, float]]:
+    def fts_search(self, query: str, limit: int, scope: str = "all",
+                 project: str | None = None) -> list[tuple[str, float]]:
         """双通道 BM25 检索，返回 [(uid, best_rank)]，rank 越小越好。
 
         porter 通道：英文词干 + 标签；trigram 通道：CJK/子串（仅 ≥3 字符的词）。
         两路结果按 uid 合并取最优 rank，顺序即 BM25 升序。
+        project 在场（且非 global 域）时两腿都加等值过滤——与向量腿对齐，
+        项目域召回不再漏入他项目条目（2026-10-17 硬化）。
         """
         terms = [t for t in query.replace('"', " ").split() if t]
         if not terms:
@@ -466,15 +469,17 @@ class MemoryStore:
         fts_query = " OR ".join(f'"{t}"' for t in terms)
         best: dict[str, float] = {}
 
+        proj_cond = " AND m.project = ?" if (project and scope != "global") else ""
+        proj_params: tuple = (project,) if proj_cond else ()
         rows = self.conn.execute(
             f"""
             SELECT m.uid, bm25(memories_fts) AS r
             FROM memories_fts f JOIN memories m ON m.id = f.rowid
             WHERE memories_fts MATCH ? AND m.deleted = 0 AND m.superseded_by IS NULL
-            {self._scope_cond(scope)}
+            {self._scope_cond(scope)}{proj_cond}
             ORDER BY r LIMIT ?
             """,
-            (fts_query, limit),
+            (fts_query, *proj_params, limit),
         ).fetchall()
         for r in rows:
             best[r["uid"]] = float(r["r"])
@@ -487,10 +492,10 @@ class MemoryStore:
                 SELECT m.uid, bm25(memories_fts_tri) AS r
                 FROM memories_fts_tri f JOIN memories m ON m.id = f.rowid
                 WHERE memories_fts_tri MATCH ? AND m.deleted = 0 AND m.superseded_by IS NULL
-                {self._scope_cond(scope)}
+                {self._scope_cond(scope)}{proj_cond}
                 ORDER BY r LIMIT ?
                 """,
-                (tri_query, limit),
+                (tri_query, *proj_params, limit),
             ).fetchall()
             for r in rows:
                 uid = r["uid"]

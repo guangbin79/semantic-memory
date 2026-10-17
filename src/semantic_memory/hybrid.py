@@ -61,7 +61,7 @@ def hybrid_recall(
     candidate_n = max(limit * 4, 20)
 
     # 通道 1：BM25
-    bm25_hits = store.fts_search(query, candidate_n, scope=scope)
+    bm25_hits = store.fts_search(query, candidate_n, scope=scope, project=project)
     bm25_ranked = [uid for uid, _ in bm25_hits]
     bm25_set = set(bm25_ranked)
 

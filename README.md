@@ -310,9 +310,11 @@ interleaved writes pays zero SQLite vector reads.
   the same service and therefore the **same index** — a memory stored by Claude
   Code is recallable from opencode. Switching harnesses loses nothing; there is
   no second copy to sync.
-- **`project` is a filter, not a partition**: the index is global; the plugin
-  filters by current project at injection time, but omitting `project` in
-  `memory_recall` searches everything.
+- **`project` is a filter, not a partition**: the index is global; project-scoped
+  recall enforces project equality on BOTH legs server-side (BM25 aligned with the
+  vector leg as of 2026-10-17), while omitting `project` in `memory_recall` searches
+  everything; same-origin solutions from other projects arrive only as flagged graph
+  extras, never as main hits.
 - **Single user, single machine**: loopback bind + optional Bearer token. No
   multi-tenancy.
 - **Attribution gap**: `source` records the origin type (chat / compaction /
@@ -550,7 +552,8 @@ pytest            # baseline 43: store / dual-channel recall / soft delete /
                   # reranker & shared model slot / git-origin project keys /
                   # stale-usage retention / cloud consolidation (mock transport) /
                   # offline eval / recall latency telemetry & throttled alerts /
-                  # cross-project graph (three edges + recall extras)
+                  # cross-project graph (three edges + recall extras) /
+                  # HTTP hardening (project-scoped BM25 equality, malformed-input 400s, uids trim, single-file runs)
 
 cd integrations/opencode
 npm install       # then:
