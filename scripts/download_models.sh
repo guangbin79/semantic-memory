@@ -30,6 +30,9 @@ DISTILL_FILE="Qwen3-1.7B-Q8_0.gguf"
 RERANK_FILE="qwen3-reranker-0.6b-q8_0.gguf"   # 该仓库内文件名全小写
 DISTILL_URL="https://huggingface.co/unsloth/Qwen3-1.7B-GGUF/resolve/main/${DISTILL_FILE}"
 RERANK_URL="https://huggingface.co/ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF/resolve/main/${RERANK_FILE}"
+# 与 setup.py 固定常量表同源（2026-10-17 硬化：手动路径补供应链钉验）
+DISTILL_SHA="0becaa825564295d82e9af4d008bca5f8b7f5f73bf1c6a0b58f7c53ef26b47fd"
+RERANK_SHA="22c9979ce4fbcdc5acdc310c6641c32797eff1aa980b8f7a2db8a8ea23429a48"
 
 if [ "${1:-}" = "--check" ]; then
   rc=0
@@ -47,18 +50,29 @@ if [ "${1:-}" = "--audit" ]; then
   exec python3 "$(cd "$(dirname "$0")" && pwd)/check_docs_env.py"
 fi
 
+verify() {  # $1=file $2=sha —— 校验失败删件退出（供应链防护）
+  local file="$1" sha="$2"
+  if ! echo "$sha  $MODEL_DIR/$file" | sha256sum -c --status -; then
+    rm -f "$MODEL_DIR/$file"
+    echo "sha256 校验失败：已删除 $file——请重试或改用 semantic-memory setup（校验/断点续传更完备）" >&2
+    exit 1
+  fi
+}
+
 download() {
-  local file="$1" url="$2"
+  local file="$1" url="$2" sha="$3"
   if [ -f "$MODEL_DIR/$file" ]; then
+    verify "$file" "$sha"   # 既存也验：损坏/被替换的模型不静默投入使用
     echo "已存在: $MODEL_DIR/$file"
   else
     echo "下载 $file ..."
     curl -fSL --progress-bar "$url" -o "$MODEL_DIR/$file"
+    verify "$file" "$sha"
   fi
 }
 
-download "$DISTILL_FILE" "$DISTILL_URL"
-download "$RERANK_FILE" "$RERANK_URL"
+download "$DISTILL_FILE" "$DISTILL_URL" "$DISTILL_SHA"
+download "$RERANK_FILE" "$RERANK_URL" "$RERANK_SHA"
 
 cat <<EOF
 

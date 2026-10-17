@@ -20,12 +20,23 @@ mkdir -p "$MODEL_DIR"
 
 FILE="Qwen3-Embedding-0.6B-Q8_0.gguf"
 URL="https://huggingface.co/Qwen/Qwen3-Embedding-0.6B-GGUF/resolve/main/${FILE}"
+# 与 setup.py 固定常量表同源（2026-10-17 硬化：手动路径补供应链钉验）
+SHA256="06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439"
 
 if [ -f "$MODEL_DIR/$FILE" ]; then
+  if ! echo "$SHA256  $MODEL_DIR/$FILE" | sha256sum -c --status -; then
+    echo "已存在但 sha256 不符：$MODEL_DIR/$FILE（损坏或被替换）——请删除后重下" >&2
+    exit 1
+  fi
   echo "已存在: $MODEL_DIR/$FILE"
 else
   echo "下载 $FILE ..."
   curl -fSL --progress-bar "$URL" -o "$MODEL_DIR/$FILE"
+  if ! echo "$SHA256  $MODEL_DIR/$FILE" | sha256sum -c --status -; then
+    rm -f "$MODEL_DIR/$FILE"
+    echo "sha256 校验失败：已删除 $FILE（供应链防护）——请重试或改用 semantic-memory setup" >&2
+    exit 1
+  fi
 fi
 
 cat <<EOF
