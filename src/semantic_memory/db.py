@@ -469,7 +469,8 @@ class MemoryStore:
         fts_query = " OR ".join(f'"{t}"' for t in terms)
         best: dict[str, float] = {}
 
-        proj_cond = " AND m.project = ?" if (project and scope != "global") else ""
+        # 与向量腿 all_vectors 同条件：仅 scope='all' 时启用（'project' 档语义＝排全域跨项目，两腿一致不窄化）
+        proj_cond = " AND m.project = ?" if (project and scope == "all") else ""
         proj_params: tuple = (project,) if proj_cond else ()
         rows = self.conn.execute(
             f"""
