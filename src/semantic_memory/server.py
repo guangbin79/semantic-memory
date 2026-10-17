@@ -248,6 +248,8 @@ def _qint(q: dict, key: str, default: int, cap: int | None = None) -> int | None
         v = int(raw)
     except (TypeError, ValueError):
         return None
+    if v < 0:
+        return None  # 负数拒绝：SQLite LIMIT 负值＝无上界，会绕开 200 封顶
     return min(v, cap) if cap is not None else v
 
 
@@ -344,16 +346,21 @@ def rest_recall(body: dict) -> dict | tuple[int, dict]:
         return 400, {"error": "query must be a string"}
     if not q.strip():
         return {"hits": []}  # 既有契约：空查询 → 空 hits（见 test_recall_empty_query）
+    raw_project = body.get("project")
+    if raw_project is not None and not isinstance(raw_project, str):
+        return 400, {"error": "project must be a string"}
     try:
         limit = int(body.get("limit", cfg.recall_limit_default))
         global_limit = int(body.get("global_limit", 0))
     except (TypeError, ValueError):
         return 400, {"error": "limit/global_limit must be integers"}
+    if limit < 0 or global_limit < 0:
+        return 400, {"error": "limit/global_limit must be non-negative"}
     t0 = time.perf_counter()
     hits = _recall_hits(
         query=q,
         limit=limit,
-        project=resolve_project(body.get("project")),
+        project=resolve_project(raw_project),
         global_limit=global_limit,
     )
     _record_recall((time.perf_counter() - t0) * 1000.0)
@@ -382,20 +389,27 @@ def _spawn_flush() -> None:
 
 
 def rest_ingest(body: dict) -> dict | tuple[int, dict]:
-    source = body.get("source", "chat")
+    source = body.get("source")
+    if source is None:
+        source = "chat"  # 显式 null 也回落 chat（dict.get 带默认不接 null）
+    if not isinstance(source, str):
+        return 400, {"error": "source must be a string"}  # 不可哈希源会在 frozenset 成员判定上 TypeError→500
     raw_project = body.get("project")
     if raw_project is not None and not isinstance(raw_project, str):
         return 400, {"error": "project must be a string"}
     project = resolve_project(raw_project)
+    content = body.get("content")
+    if not isinstance(content, str):
+        return 400, {"error": "content must be a string"}
     if source in QUEUED_SOURCES:
-        pending = enqueue_raw(store, body["content"], source, project,
+        pending = enqueue_raw(store, content, source, project,
                               body.get("session_id"))
         if cfg.distill_batch > 0 and pending >= cfg.distill_batch:
             _spawn_flush()  # 触发器一路：队列积压达阈值（flush 在 daemon 线程）
         return {"queued": True, "pending": pending}
     uid, deduped = ingest_with_dedup(
         store, embedder,
-        content=body["content"],
+        content=content,
         kind=body.get("kind", "fact"),
         source=source,
         project=project,
@@ -415,7 +429,7 @@ def inject_report(body: dict) -> tuple[int, dict]:
     uids = body.get("uids")
     if not isinstance(uids, list) or not all(isinstance(u, str) for u in uids):
         return 400, {"error": "uids must be a string array"}
-    uids = uids[:50]  # 截断：防超长列表打爆 stamp_recalled 的 SQL 变量上限（与存储侧 trim 同语义）
+    # 遥测侧 record_injection 自带 uids[:50]；stamp 走分批不截断（见循环处注释）
     try:
         chars = int(body.get("chars", 0))
     except (TypeError, ValueError):
@@ -428,7 +442,9 @@ def inject_report(body: dict) -> tuple[int, dict]:
         chars=chars,
         project=body.get("project"),
     )
-    stamp_recalled(store, uids)
+    # 落入 stale_candidates 被留存误清（评审 R1-C2 修正）
+    for i in range(0, len(uids), 50):
+        stamp_recalled(store, uids[i:i + 50])
     return 200, {"recorded": True, "id": rid}
 
 

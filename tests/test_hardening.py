@@ -65,3 +65,28 @@ def test_api_memories_bad_limit_400(client):
 def test_ingest_nonstring_project_400(client):
     r = client.post("/ingest", json={"content": "x", "project": {"a": 1}})
     assert r.status_code == 400 and "error" in r.json()
+
+
+def test_recall_nonstring_project_400(client):
+    r = client.post("/recall", json={"query": "x", "project": ["p"]})
+    assert r.status_code == 400 and "error" in r.json()
+
+
+def test_negative_limits_400(client):
+    """负数 limit：/recall 防切片语义静默错果，GET 防绕 200 封顶（SQLite 负 LIMIT＝无界）。"""
+    assert client.post("/recall", json={"query": "x", "limit": -1}).status_code == 400
+    assert client.get("/api/memories", params={"limit": -1}).status_code == 400
+    assert client.get("/api/injections", params={"limit": -5}).status_code == 400
+
+
+def test_ingest_missing_content_400(client):
+    r = client.post("/ingest", json={"kind": "fact"})
+    assert r.status_code == 400 and "error" in r.json()
+
+
+def test_ingest_bad_or_null_source(client):
+    """不可哈希 source → 400 非 500；显式 null → 回落 chat 正常落库。"""
+    r = client.post("/ingest", json={"content": "硬化验证 nullsrc", "source": ["chat"]})
+    assert r.status_code == 400 and "error" in r.json()
+    r2 = client.post("/ingest", json={"content": "硬化验证 nullsrc 正常体", "source": None, "kind": "fact"})
+    assert r2.status_code == 200 and r2.json().get("queued") is True  # null→chat 走入队路径
