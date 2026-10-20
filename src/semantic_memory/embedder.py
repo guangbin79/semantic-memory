@@ -43,6 +43,17 @@ def format_query(text: str) -> str:
     return f"Instruct: {QUERY_INSTRUCT}\nQuery: {text}"
 
 
+# 单条输入字符预算：纵深防御（库 embed() 默认 truncate=True 已截 n_batch=512 token，
+# 此钳制保证批内合计与 instruct 前缀仍远离 8192 窗口）。真正的进程死根因是并发推理
+# 无互斥（见 _infer_lock），非超窗——勿据本注释回推根因（2026-10-20 评审勘误）。
+EMBED_TEXT_CHAR_BUDGET: Final = 6000
+
+
+def clamp_embed_text(text: str) -> str:
+    """嵌入输入钳制到窗口安全预算（信任边界净化：超窗是调用方错误，服务端必须兜住）。"""
+    return text[:EMBED_TEXT_CHAR_BUDGET]
+
+
 def _l2_normalized(mat: npt.NDArray[np.floating]) -> npt.NDArray[np.float32]:
     m = mat.astype(np.float32)
     return m / np.maximum(np.linalg.norm(m, axis=1, keepdims=True), 1e-12)
@@ -109,6 +120,10 @@ class Embedder:
         # 首嵌并发门：ThreadingHTTPServer 多请求线程 + flush daemon 同时首嵌时，
         # 避免双载 600MB 模型（Reranker/Distiller 经 ModelSlot 有锁，本类独居无槽）。
         self._load_lock = threading.Lock()
+        # 推理互斥：llama_cpp.Llama 非线程安全（llama_decode 释放 GIL），并发 embed
+        # 会触发 C 层数据竞争（GGML_ASSERT/NULL pointer → 进程死）。_load_lock 只护
+        # 首载不护推理——本锁串行化 首载+嵌入+CPU重建 全程（2026-10-20 并发实证）。
+        self._infer_lock = threading.Lock()
         self.available = False
         if not HAS_NUMPY:
             log.warning("numpy 未安装，向量通道关闭（纯 BM25 模式）：%s", INSTALL_HINT)
@@ -181,17 +196,22 @@ class Embedder:
     # ---------- 对外接口 ----------
 
     def embed_batch(self, texts: list[str]) -> npt.NDArray[np.float32] | None:
-        """文档侧：原文嵌入 -> (n, 1024) float32 行归一化；不可用返回 None。"""
+        """文档侧：原文嵌入 -> (n, 1024) float32 行归一化；不可用返回 None。
+
+        全程持 _infer_lock：Llama 实例非线程安全，并发推理是进程死级竞态。
+        """
         if not self.available or not texts:
             return None
-        self._ensure_loaded()
-        try:
-            mat = self._embed_all(texts)
-        except Exception as exc:
-            if self.device != "cuda":
-                raise
-            self._rebuild_on_cpu(exc)
-            mat = self._embed_all(texts)
+        with self._infer_lock:
+            self._ensure_loaded()
+            texts = [clamp_embed_text(t) for t in texts]
+            try:
+                mat = self._embed_all(texts)
+            except Exception as exc:
+                if self.device != "cuda":
+                    raise
+                self._rebuild_on_cpu(exc)
+                mat = self._embed_all(texts)
         return _l2_normalized(mat)
 
     def embed_query(self, text: str) -> npt.NDArray[np.float32] | None:

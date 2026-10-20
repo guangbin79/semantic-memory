@@ -10,6 +10,8 @@ import pytest
 
 np = pytest.importorskip("numpy")  # 零依赖基座：无 numpy 时整模块跳过
 
+
+
 MODEL = os.environ.get("MEMORY_MODEL_PATH", "")
 pytestmark = pytest.mark.skipif(
     not MODEL or not Path(MODEL).exists(),
