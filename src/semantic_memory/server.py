@@ -264,6 +264,15 @@ def api_injections(q: dict) -> dict | tuple[int, dict]:
         limit=limit,
         offset=offset,
     )
+    if q.get("expand") == "1":
+        # 侧边栏/面板预览：uids→记忆摘要批量展开（cap 500 防 IN 参数越界）
+        for row in rows:
+            if isinstance(row["uids"], str):
+                row["uids"] = json.loads(row["uids"])
+        uid_list = sorted({uid for row in rows for uid in row["uids"][:50]})[:500]
+        previews = store.memories_by_uids(uid_list)
+        for row in rows:
+            row["memories"] = [previews[uid] for uid in row["uids"] if uid in previews]
     return {"injections": rows}
 
 

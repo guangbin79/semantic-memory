@@ -133,6 +133,10 @@ cp integrations/opencode/memory.ts ~/.config/opencode/plugins/
 # — or declare it in opencode.jsonc's "plugin" array instead, optionally with
 #   plugin options (see "Configuration" below):
 #   "plugin": [["file:///abs/path/to/semantic-memory/integrations/opencode", {"url": "http://127.0.0.1:9000"}]]
+
+# optional: TUI sidebar panel (recent memory injections, Ctrl+X B to view).
+# TUI plugin discovery only accepts directories/symlinks:
+#   ln -s ~/semantic-memory/integrations/opencode/tui-plugin ~/.config/opencode/plugins/semantic-memory-tui
 ```
 
 Every other harness is a thin "hook event → curl localhost:8765" shell adapter —

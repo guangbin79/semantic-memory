@@ -29,6 +29,19 @@ def test_report_and_list(client):
     assert rows[0]["project"] == "p1"
 
 
+def test_injections_expand(client):
+    uid = client.post("/ingest", json={
+        "content": "评审循环欠债门时间轴化裁定", "kind": "decision",
+        "source": "manual", "project": "p1"}).json()["uid"]
+    client.post("/inject/report", json={
+        "harness": "opencode", "hook": "context", "query": "欠债门",
+        "uids": [uid, "ghost"], "project": "p1"})
+    rows = client.get("/api/injections", params={"expand": "1"}).json()["injections"]
+    assert rows[0]["memories"] == [{"kind": "decision", "project": "p1", "preview": "评审循环欠债门时间轴化裁定"}]
+    plain = client.get("/api/injections").json()["injections"]
+    assert "memories" not in plain[0]
+
+
 def test_report_validation(client):
     assert client.post("/inject/report", json={"uids": "notalist"}).status_code == 400
     assert client.post("/inject/report", json={"uids": [1, 2]}).status_code == 400

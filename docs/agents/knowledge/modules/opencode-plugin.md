@@ -15,6 +15,17 @@
 - **Source:** session ses_ea6ef6d57ffewSnefsn5aJbOWb（2026-10-20）
 - **Decision:** 一律 `cp integrations/opencode/memory.ts ~/.config/opencode/plugins/`；`@opencode/plugin` 依赖装进 `~/.config/opencode/package.json`（`bun add @opencode/plugin@^2.0.28`，OpenCode 启动时自动 bun install 的官方机制）
 - **Reason:** opencode.json 的 file:// 对象式 plugins 条目未列入官方文档（仅支持 npm 包名字符串），且该形态下依赖无处解析——实测从未加载成功。README 中该指引已证实为坏路径，待修
+- **Supplements（2026-10-20 晚）:** TUI 侧边栏面板走**目录形态**：`ln -s …/integrations/opencode/tui-plugin ~/.config/opencode/plugins/semantic-memory-tui`——TUI 插件发现（packages/tui/src/plugin/discovery.ts）只认目录/软链，单文件永不被 TUI 加载；入口约定＝目录下 `tui.tsx`（Host.resolve 解析 ./tui），槽位＝`context.ui.slot({ append: "sidebar.content" })`，热重载生效无需 service restart
+
+## 环境陷阱（Bug Experiences 补遗）
+
+### venv 非可编辑安装：测试绿而服务行为旧（2026-10-20）
+- **Id:** opencode-plugin/venv-non-editable
+- **Source:** session ses_ea6ef6d57ffewSnefsn5aJbOWb（2026-10-20）
+- **Symptom:** pytest 全绿（pythonpath=["src"] 跑新代码）但 `~/.local/bin/semantic-memory` 行为仍旧——API 新参数被静默忽略
+- **Root cause:** venv 里 `pip install .` 非可编辑副本，console 入口跑 site-packages 旧代码；tests 与服务跑的是两份代码
+- **Fix:** 改 src 后 `venv/bin/pip install .` 重装再重启服务；或开发期 `PYTHONPATH=src python3 -m semantic_memory`
+- **Prevention:** 改 src 后凡经 console 入口验证，先重装；「测试绿」不能为「服务行为」作证——两边跑的代码可能不同源
 
 ## Bug Experiences
 
@@ -26,7 +37,17 @@
 - **Fix:** cp 至 plugins/ ＋ config 目录 bun add ＋ 删 file:// 条目 ＋ autostart 环境变量 ＋ service restart
 - **Prevention:** 插件加载失败全程静默——存在性探针＝当前会话工具列表是否含 `memory_store`/`memory_recall`；npm test（mock harness）全绿不代表真机加载路径通；改动后三步验证：service restart → 看工具列表 → 服务死后看 injections 是否恢复增长
 
+## Bug Experiences
+
+### 服务反复静默死亡：并发推理无互斥（GGML abort，2026-10-20）
+- **Id:** opencode-plugin/ggml-concurrent-inference
+- **Source:** session ses_ea6ef6d57ffewSnefsn5aJbOWb（2026-10-20）；serve.log `GGML_ASSERT(out_ids==n_outputs)`
+- **Symptom:** 服务数日内 3 次静默消失（19:38 起）；每次都发生在一次 recall 完成打点后瞬间
+- **Root cause:** ThreadingHTTPServer 多请求线程并发调用同一非线程安全 `llama_cpp.Llama`（llama_decode 释放 GIL；Embedder 独居 ModelSlot 槽外，`_load_lock` 只护首载不护推理）→ C 层数据竞争 abort。**首修走了弯路：误判为超窗输入**——库 `embed()` 默认 `truncate=True` 截 n_batch=512 token，超长输入直调库存活；零共享终闸 R2 以并发复现（3 线程 exit 135）推翻
+- **Fix:** `Embedder._infer_lock` 全程互斥（_ensure_loaded＋embed＋CPU 重建）；字符钳制 6000 保留为纵深防御
+- **Prevention:** 涉及非线程安全 C 库的请求路径，首载锁≠推理锁；并发回归测试必须防「空转绿」——桩测试经 `__new__` 绕过 `__init__` 时锁属性缺失会让线程崩在锁前、桩从未执行、收集断言空转 PASS（R3 教训：须补锁属性＋进入计数 `len(calls)==N` 断言，并以摘锁红/装锁绿双向实证）
+
 ## Open Questions
 
-- 系统重启后 `.zshrc` 的 `MEMORY_PLUGIN_AUTOSTART=1` 能否进 serve 进程 env 未实证——下次重启后 `curl -m2 http://127.0.0.1:8765/health` 验证 autostart 自愈
-- README 双语"file:// 声明式安装"指引为坏路径，尚未修正
+- README 双语"file:// 声明式安装"指引为坏路径，尚未修正（2026-10-20 晚：对象式实测失败；元组式未测，修正前需先实证）
+- ~~系统重启后 `.zshrc` 的 `MEMORY_PLUGIN_AUTOSTART=1` 能否进 serve 进程 env~~（2026-10-20 晚已答：`opencode service restart` 自非交互 shell 跑时不可达；但用户正常流 zsh→TUI→serve 继承链成立——仅手动 service restart 后需手动拉起服务）

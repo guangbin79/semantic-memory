@@ -724,6 +724,20 @@ class MemoryStore:
         args += [limit, offset]
         return [dict(r) for r in self.conn.execute(sql, args)]
 
+    def memories_by_uids(self, uids: list[str]) -> dict[str, dict]:
+        """uid→记忆摘要（注入展开/面板预览用）；未知与已删 uid 静默缺失。"""
+        if not uids:
+            return {}
+        marks = ",".join("?" * len(uids))
+        rows = self.conn.execute(
+            f"SELECT uid, kind, project, content FROM memories WHERE uid IN ({marks}) AND deleted=0",
+            uids,
+        ).fetchall()
+        return {
+            r["uid"]: {"kind": r["kind"], "project": r["project"], "preview": r["content"][:120]}
+            for r in rows
+        }
+
     def injection_counts(self, uids: list[str]) -> dict[str, int]:
         """给定 uid 集合的历史注入次数（遥测反哺排序用）。
 

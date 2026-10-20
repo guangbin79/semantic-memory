@@ -115,6 +115,10 @@ cp integrations/opencode/memory.ts ~/.config/opencode/plugins/
 # ——或不复制，直接在 opencode.jsonc 的 plugin 数组声明，可附带插件
 #   options（见下文"配置"一节）：
 #   "plugin": [["file:///abs/path/to/semantic-memory/integrations/opencode", {"url": "http://127.0.0.1:9000"}]]
+
+# 可选：TUI 侧边栏面板（最近记忆注入，Ctrl+X B 查看）。
+# TUI 插件发现只认目录/软链：
+#   ln -s ~/semantic-memory/integrations/opencode/tui-plugin ~/.config/opencode/plugins/semantic-memory-tui
 ```
 
 其余宿主都是"钩子事件 → curl localhost:8765"的薄适配器——见
