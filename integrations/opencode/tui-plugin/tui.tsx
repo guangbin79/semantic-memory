@@ -19,6 +19,7 @@ export function SidebarMemory(props: { context: Plugin.Context; sessionID: strin
   const [rows, setRows] = createSignal<Inj[]>([])
   const [degraded, setDegraded] = createSignal<string | null>(null)
   const [online, setOnline] = createSignal<boolean | null>(null)
+  const [rowsOk, setRowsOk] = createSignal(false) // 零态前提：injections 拉取成功——health 探活≠数据可读
   const theme = props.context.theme
 
   const refresh = async () => {
@@ -36,10 +37,11 @@ export function SidebarMemory(props: { context: Plugin.Context; sessionID: strin
       const res = await fetch(
         `${SERVICE}/api/injections?session_id=${encodeURIComponent(props.sessionID)}&limit=${MAX_ROWS}`,
       )
-      if (!res.ok) return
+      if (!res.ok) { setRowsOk(false); return }
       const data = await res.json()
       setRows(data.injections ?? [])
-    } catch { /* 服务离线：保持旧态，下轮再试 */ }
+      setRowsOk(true)
+    } catch { setRowsOk(false) /* rows 保持旧态，但零态不得假断言「无注入」 */ }
   }
   onMount(() => {
     void refresh()
@@ -90,7 +92,7 @@ export function SidebarMemory(props: { context: Plugin.Context; sessionID: strin
         )}
       </Show>
       {/* 零命中是相关性召回的常态而非故障，空白会被误读为「插件未加载」——如实显示已连接零态 */}
-      <Show when={!degraded() && online() && !latest()}>
+      <Show when={!degraded() && online() && rowsOk() && !latest()}>
         <box>
           <text fg={theme.text.muted}>semantic-memory · 已连接 · 本会话无相关记忆注入</text>
         </box>
