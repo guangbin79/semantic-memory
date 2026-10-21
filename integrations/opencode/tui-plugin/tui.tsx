@@ -17,9 +17,17 @@ type Inj = { ts: number; hook: string; project: string | null; chars: number; bl
 
 export function SidebarMemory(props: { context: Plugin.Context; sessionID: string }) {
   const [rows, setRows] = createSignal<Inj[]>([])
+  const [degraded, setDegraded] = createSignal<string | null>(null)
   const theme = props.context.theme
 
   const refresh = async () => {
+    try {
+      const h = await fetch(`${SERVICE}/health`)
+      if (h.ok) {
+        const hd = await h.json()
+        setDegraded(hd.gpu_degraded ?? null)
+      }
+    } catch { /* 服务离线：保持旧态，下轮再试 */ }
     try {
       const res = await fetch(
         `${SERVICE}/api/injections?session_id=${encodeURIComponent(props.sessionID)}&limit=${MAX_ROWS}`,
@@ -53,22 +61,31 @@ export function SidebarMemory(props: { context: Plugin.Context; sessionID: strin
   const [view, updateView] = props.context.storage.store("open", { initial: { open: true } })
 
   return (
-    <Show when={latest()}>
-      {(inj) => (
+    <>
+      {/* 熔断期：停止注入是设计（劣质召回不如不注入）——面板显示服务状态 */}
+      <Show when={degraded()}>
         <box>
-          <box flexDirection="row" gap={1}>
-            <text onMouseDown={() => void updateView((draft) => { draft.open = !draft.open }).catch(() => {})}>
-              {view.open ? "▼" : "▶"}
-            </text>
-            <text fg={theme.text.base}><b>上下文注入</b></text>
-            <text fg={theme.text.muted}>{rel(inj().ts)} · {inj().project ?? "-"} · {inj().hook}</text>
-          </box>
-          <Show when={view.open}>
-            <text fg={theme.text.base}>{inj().block ?? ""}</text>
-          </Show>
+          <text fg={theme.text.base}><b>记忆服务已熔断</b></text>
+          <text fg={theme.text.muted}>{degraded()}</text>
         </box>
-      )}
-    </Show>
+      </Show>
+      <Show when={!degraded() && latest()}>
+        {(inj) => (
+          <box>
+            <box flexDirection="row" gap={1}>
+              <text onMouseDown={() => void updateView((draft) => { draft.open = !draft.open }).catch(() => {})}>
+                {view.open ? "▼" : "▶"}
+              </text>
+              <text fg={theme.text.base}><b>Context Injection</b></text>
+              <text fg={theme.text.muted}>{rel(inj().ts)} · {inj().project ?? "-"} · {inj().hook}</text>
+            </box>
+            <Show when={view.open}>
+              <text fg={theme.text.base}>{inj().block ?? ""}</text>
+            </Show>
+          </box>
+        )}
+      </Show>
+    </>
   )
 }
 

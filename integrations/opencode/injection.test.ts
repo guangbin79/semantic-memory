@@ -5,7 +5,7 @@
 import { beforeEach, describe, expect, test } from "bun:test"
 import {
   buildHeadBlock, formatBlock, firstUserText, hashOf, partsText, recallBlock,
-  recentUserText, stateOf, transcriptText,
+  recallHits, recentUserText, stateOf, transcriptText,
 } from "./memory.ts"
 
 // ---------- 环境隔离：bun 测试内 fetch 全部走桩 ----------
@@ -139,6 +139,23 @@ describe("recentUserText / firstUserText", () => {
   ]
   test("recentUserText 取末条 user", () => { expect(recentUserText({ messages: msgs })).toBe("最近一条") })
   test("firstUserText 取首条 user", () => { expect(firstUserText({ messages: msgs })).toBe("第一条") })
+})
+
+describe("熔断降级语义（停止注入优于劣质注入）", () => {
+  test("召回响应带 gpu_degraded → recallBlock 返回 null（不注入）", async () => {
+    stubFetch(() => ({ hits: [{ uid: "u1", content: "c", kind: "fact", project: "p" }], gpu_degraded: "embed CUDA error" }))
+    const st = stateOf("degraded-session")
+    expect(await recallBlock("q", "p", st)).toBeNull()
+  })
+  test("熔断期 buildHeadBlock 返回 undefined（重试语义，恢复后头块仍能建）", async () => {
+    stubFetch(() => ({ hits: [{ uid: "u1", content: "c", kind: "preference", project: "p" }], gpu_degraded: "x" }))
+    expect(await buildHeadBlock("q", "p")).toBeUndefined()
+  })
+  test("正常响应（无 gpu_degraded）→ 注入照常", async () => {
+    stubFetch(() => ({ hits: [{ uid: "u1", content: "c", kind: "fact", project: "p" }] }))
+    const st = stateOf("degraded-normal")
+    expect(await recallBlock("q", "p", st)).not.toBeNull()
+  })
 })
 
 describe("hashOf：注入集合指纹", () => {

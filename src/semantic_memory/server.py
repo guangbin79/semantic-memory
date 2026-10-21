@@ -378,7 +378,12 @@ def rest_recall(body: dict) -> dict | tuple[int, dict]:
         global_limit=global_limit,
     )
     _record_recall((time.perf_counter() - t0) * 1000.0)
-    return {"hits": hits}
+    out = {"hits": hits}
+    if gpu_breaker.tripped():
+        # 熔断期：注入是干扰不是帮助（用户裁定：达不到准确不如不用）——
+        # 响应带降级标记，插件据此停止注入；BM25 召回本体照常（工具显式调用可用）
+        out["gpu_degraded"] = gpu_breaker.reason()
+    return out
 
 
 # 入队路由（r3 评审）：chat/compaction 是蒸馏队列的投料源——落盘缓冲、热路径零 LLM；

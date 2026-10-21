@@ -149,3 +149,16 @@ def test_flush_tripped_drains_raw(store):
     report = flush_distill_queue(store, _NoopDistiller())
     assert report["typed"] == 0 and report["stored_raw"] == 1 and report["left_pending"] == 0
     assert store.stats()["total"] == 1
+
+
+def test_recall_reports_gpu_degraded_but_bm25_works(client):
+    """熔断期：/recall 响应带 gpu_degraded 标记（插件据此停止注入），
+    但 BM25 召回本体照常（memory_recall 工具显式调用仍可用）。"""
+    gpu_breaker.trip("unit-test")
+    try:
+        r = client.post("/recall", json={"query": "anything", "limit": 3})
+        data = r.json()
+        assert data["gpu_degraded"] == "unit-test"
+        assert "hits" in data  # BM25 召回照常（本例空库 → 空 hits）
+    finally:
+        gpu_breaker.reset_for_test()

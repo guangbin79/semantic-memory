@@ -367,8 +367,9 @@ type StableCtx = Parameters<Parameters<typeof Plugin.define>[0]["setup"]>[0];
 /**
  * 召回（两条加载线共用）。返回 null = 服务不可达 / 无查询。
  * globalMemories 开启时 /recall 随传 global_limit=2（服务端项目条目在前、不挤占配额）。
+ * degraded=true = 服务端已熔断（CUDA 上下文损坏）——注入是干扰不是帮助，停止注入。
  */
-async function recallHits(query: string, limit: number, project: string | undefined): Promise<Hit[] | null> {
+export async function recallHits(query: string, limit: number, project: string | undefined): Promise<{ hits: Hit[]; degraded: boolean } | null> {
   if (!(await ensureService())) return null;
   if (!query) return null;
   const res = await post("/recall", {
@@ -377,7 +378,8 @@ async function recallHits(query: string, limit: number, project: string | undefi
     project,
     ...(cfg.globalMemories ? { global_limit: 2 } : {}),
   });
-  return res?.hits ?? [];
+  if (!res) return null;
+  return { hits: res.hits ?? [], degraded: !!res.gpu_degraded };
 }
 
 /**
@@ -386,8 +388,10 @@ async function recallHits(query: string, limit: number, project: string | undefi
  * "" = 本次召回无偏好/决策命中（冻结为空，不再重算）。
  */
 export async function buildHeadBlock(query: string, project: string | undefined): Promise<string | undefined> {
-  const hits = await recallHits(query, 20, project);
-  if (!hits) return undefined;
+  const r = await recallHits(query, 20, project);
+  if (!r) return undefined;
+  if (r.degraded) return undefined;  // 熔断期：undefined＝下个钩子重试（服务重启后恢复）
+  const hits = r.hits;
   const head = hits
     // 排除跨项目附加条目：extras 保留目标行原始 kind（可为 preference/decision）
     // 且带真实注入计数，不排除则他项目偏好可钉进整会话的冻结头块（task11 不变量）
@@ -420,8 +424,11 @@ export async function recallBlock(
   project: string | undefined,
   st: SessionState,
 ): Promise<{ block: string; hits: Hit[]; query: string } | null> {
-  const hits = await recallHits(query, cfg.limit, project);
-  if (!hits?.length) return null;
+  const r = await recallHits(query, cfg.limit, project);
+  if (!r) return null;
+  if (r.degraded) return null;  // 熔断期：停止注入（劣质召回不如不注入）
+  const hits = r.hits;
+  if (!hits.length) return null;
   const hash = hashOf(hits.map((h) => h.uid));
   if (hash === st.lastInjectHash) return null; // 集合未变，跳过重复注入
   st.lastInjectHash = hash;
