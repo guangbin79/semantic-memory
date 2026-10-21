@@ -187,17 +187,20 @@ class Reranker:
         if self._yes_ids is None:
             self._resolve_ids(model)  # 词表解析失败 → 下方通用 except → fail-open
         scored: list[tuple[str, float]] = []
-        for uid, content in candidates:
-            if time.monotonic() > deadline:  # 每次推理前检查，超时整体 fail-open
-                raise _BudgetExceeded
-            try:
-                # 仅推理纳入 GPU 重建边界：纯 Python 打分错误不应触发永久 CPU 降级
-                resp = self._infer(model, format_prompt(DEFAULT_INSTRUCT, query, content))
-            except Exception as exc:
-                if self.device != "cuda":
-                    raise
-                raise _GpuInferenceError(str(exc)) from exc
-            scored.append((uid, self._score_from(model, resp)))  # 行读取/softmax 出错 → 直接 fail-open
+        # INFER_LOCK：跨模型 GPU 推理全局互斥（embedder 常驻 × 槽内模型并发
+        # 解码即 CUDA error/GGML abort——2026-10-21 四类崩溃审计的机制结论）
+        with gpu_breaker.INFER_LOCK:
+            for uid, content in candidates:
+                if time.monotonic() > deadline:  # 每次推理前检查，超时整体 fail-open
+                    raise _BudgetExceeded
+                try:
+                    # 仅推理纳入 GPU 重建边界：纯 Python 打分错误不应触发永久 CPU 降级
+                    resp = self._infer(model, format_prompt(DEFAULT_INSTRUCT, query, content))
+                except Exception as exc:
+                    if self.device != "cuda":
+                        raise
+                    raise _GpuInferenceError(str(exc)) from exc
+                scored.append((uid, self._score_from(model, resp)))  # 行读取/softmax 出错 → 直接 fail-open
         return sorted(scored, key=lambda kv: kv[1], reverse=True)
 
     # ---------- 对外接口 ----------

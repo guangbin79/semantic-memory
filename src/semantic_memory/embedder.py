@@ -216,7 +216,8 @@ class Embedder:
             self._ensure_loaded()
             texts = [clamp_embed_text(t) for t in texts]
             try:
-                mat = self._embed_all(texts)
+                with gpu_breaker.INFER_LOCK:
+                    mat = self._embed_all(texts)
             except Exception as exc:
                 if self.device != "cuda":
                     raise
@@ -227,7 +228,8 @@ class Embedder:
                 self._model = None
                 self._rebuild_on_cpu(exc)
                 try:
-                    mat = self._embed_all(texts)
+                    with gpu_breaker.INFER_LOCK:
+                        mat = self._embed_all(texts)
                 except Exception as exc2:
                     log.warning("embed CPU 重建后仍失败（%s）——放弃向量", exc2)
                     return None

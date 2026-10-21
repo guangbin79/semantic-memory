@@ -162,3 +162,62 @@ def test_recall_reports_gpu_degraded_but_bm25_works(client):
         assert "hits" in data  # BM25 召回照常（本例空库 → 空 hits）
     finally:
         gpu_breaker.reset_for_test()
+
+
+def test_global_infer_lock_serializes_cross_model(store):
+    # 四类崩溃审计结论：embedder（常驻）× 槽内模型并发解码 → CUDA abort。
+    # INFER_LOCK 必须让 embed 与 rerank 的 GPU 推理窗口互斥（跨模型）。
+    import time as time_mod
+
+    from test_reranker import MockRerankModel
+
+    gpu_breaker.reset_for_test()
+    active: list[str] = []
+    overlaps: list[str] = []
+    errors: list[Exception] = []
+
+    def tracker(name, fn):
+        def w(*a, **k):
+            active.append(name)
+            others = [x for x in active if x != name]
+            if others:
+                overlaps.append(f"{name} vs {others}")
+            try:
+                time_mod.sleep(0.02)
+                return fn(*a, **k)
+            except Exception as exc:
+                errors.append(exc)
+                return None
+            finally:
+                active.remove(name)
+        return w
+
+    e = _embedder_stub()
+    import numpy as np
+    e._embed_all = tracker("embed", lambda texts: np.zeros((len(texts), 4), dtype=np.float32))
+
+    r = Reranker.__new__(Reranker)
+    r.available = True
+    r.device = "cuda"
+    r.budget_ms = 5000
+    r._yes_ids = ["yes", "no"]
+    r._resolve_ids = lambda model: None
+    r._score_from = lambda model, resp: 0.5
+    from semantic_memory.modelslot import ModelSlot
+    r._slot = ModelSlot()
+    r._force_cpu = False
+    dummy = object()
+    r._infer = tracker("rerank", lambda model, prompt: {"choices": [{"text": "yes"}]})
+    r._load = lambda: dummy
+
+    threads = []
+    for k in range(3):
+        threads.append(threading.Thread(target=e.embed_batch, args=([f"x{k}"],)))
+        threads.append(threading.Thread(target=r.rerank, args=("q", [("u", "doc")])))
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, f"推理错误: {errors}"
+    assert not overlaps, f"检测到跨模型并发推理: {overlaps[:3]}"

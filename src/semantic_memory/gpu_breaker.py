@@ -16,6 +16,13 @@ import threading
 from typing import Any
 
 _lock = threading.Lock()
+INFER_LOCK = threading.Lock()
+"""进程级 GPU 推理全局互斥：三条模型路径（embedder/reranker/distiller）的
+加载与推理都先持此锁。背景（2026-10-21 四类崩溃审计）：llama.cpp 的 CUDA
+后端状态跨 context 共享且非线程安全——embedder（常驻）与槽内模型并发解码
+即触发 CUDA error/GGML abort（第 4 类死亡的机制）。锁顺序恒定：
+embedder 为 _infer_lock→INFER_LOCK，槽路径为 INFER_LOCK（槽锁已先行释放），
+无嵌套交叉，无死锁面。单机单用户下串行化的延迟代价可忽略。"""
 _tripped = False
 _reason = ""
 

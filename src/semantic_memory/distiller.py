@@ -24,6 +24,7 @@ from typing import Any, Final
 
 from . import gpu_breaker
 
+
 from .embedder import _pid_vram_on_gpu, _preload_cuda_libs
 from .modelslot import ModelSlot
 
@@ -216,12 +217,14 @@ class Distiller:
         neighbors: list[tuple[str, str]] | None = None,
     ) -> str:
         try:
-            resp = model.create_completion(
-                format_prompt(texts, project, neighbors),
-                max_tokens=MAX_NEW_TOKENS,
-                temperature=0.1,
-                stop=[IM_END],
-            )
+            # INFER_LOCK：跨模型 GPU 推理全局互斥（同 gpu_breaker.INFER_LOCK 注释）
+            with gpu_breaker.INFER_LOCK:
+                resp = model.create_completion(
+                    format_prompt(texts, project, neighbors),
+                    max_tokens=MAX_NEW_TOKENS,
+                    temperature=0.1,
+                    stop=[IM_END],
+                )
         except Exception as exc:
             if self.device != "cuda":
                 raise
