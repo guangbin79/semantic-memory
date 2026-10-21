@@ -19,6 +19,14 @@
 
 ## 环境陷阱（Bug Experiences 补遗）
 
+### 蒸馏生成路径 sampler 断言崩进程（2026-10-21，第 4 类）
+- **Id:** opencode-plugin/distill-sampler-abort
+- **Source:** session ses_ea6ef6d57ffewSnefsn5aJbOWb（2026-10-21）；serve.log `llama-sampler.cpp:940: GGML_ASSERT(logits != nullptr)`
+- **Symptom:** 服务第 4 次静默死亡；同日 09:53 flush 蒸馏返回 None（raw 直存 7 条）为同路径前兆
+- **Root cause:** Distiller（1.7B 生成，ModelSlot 换载）generate 路径 sampler 断言——与 embedder 并发互斥修复正交（互斥只护 embedder）；换载后 CUDA 上下文状态疑似腐坏
+- **Fix（临时止损）:** config.toml 注释 distill_model → Distiller(None) → flush 走 raw 直存兜底（捕获过滤器已上游挡噪音，raw 内容为真实用户消息）；蒸馏 typed 功能待架构审计后恢复
+- **Prevention:** 架构任务（ModelSlot/CUDA 上下文管理）必须覆盖全部三条模型路径（embedder/reranker/distiller），逐路径修锁不 enough；蒸馏 fail-open（None→raw）与崩溃（abort）的边界要在架构层消除
+
 ### venv 非可编辑安装：测试绿而服务行为旧（2026-10-20）
 - **Id:** opencode-plugin/venv-non-editable
 - **Source:** session ses_ea6ef6d57ffewSnefsn5aJbOWb（2026-10-20）

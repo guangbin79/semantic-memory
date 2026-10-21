@@ -65,16 +65,19 @@ describe("INJECTION_RE（与工具路径同策略）", () => {
   })
 })
 
-describe("REMEMBER_RE（显式 remember 路径）", () => {
-  test("中文记住指令", () => {
+describe("REMEMBER_RE（显式 remember 路径：冒号强制——文档字样不误触发）", () => {
+  test("中文记住指令（带冒号）", () => {
     const m = REMEMBER_RE.exec("记住：偏好 uv 包管理器")
     expect(m?.[1]).toContain("偏好 uv 包管理器")
   })
-  test("英文 remember 独立词命中", () => {
+  test("英文 remember 带冒号命中", () => {
     expect(REMEMBER_RE.test("remember: prefer uv")).toBe(true)
   })
-  test("remembering 词内子串不命中（R2 评审会话误捕回归）", () => {
+  test("remembering 词内子串不命中", () => {
     expect(REMEMBER_RE.test('…"Output [] when nothing is worth remembering"＝合法整组丢弃…')).toBe(false)
+  })
+  test("文档字样 REMEMBER_RE/\\bremember\\b 不命中（六胞胎类回归）", () => {
+    expect(REMEMBER_RE.test("REMEMBER_RE 加 \\bremember\\b 词边界（修复 \"worth remembering\" 词内子串误触发捕获）③memory.ts 四符号导出")).toBe(false)
   })
 })
 

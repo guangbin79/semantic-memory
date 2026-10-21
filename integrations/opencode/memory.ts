@@ -292,7 +292,7 @@ function partsText(parts: unknown): string {
   return "";
 }
 
-export const REMEMBER_RE = /(?:记住|请记住|\bremember\b)[:：]?\s*(.{10,500})/i;
+export const REMEMBER_RE = /(?:记住|请记住|remember)[:：]\s*(.{10,500})/i;
 
 /** Harness 生成文案黑名单：自动化横幅不是用户知识，捕获即污染（2026-10-21 六胞胎噪音实证：
  *  review-loop 触发器文本被 6 个并发会话各存一份并高频回流上下文）。
