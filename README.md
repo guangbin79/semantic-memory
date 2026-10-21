@@ -130,9 +130,6 @@ opencode v2 (the only in-process integration):
 cp integrations/opencode/memory.ts ~/.config/opencode/plugins/
 # the plugin directory needs @opencode/plugin (types only):
 #   cd ~/.config/opencode && npm install @opencode/plugin@^2.0.28
-# — or declare it in opencode.jsonc's "plugin" array instead, optionally with
-#   plugin options (see "Configuration" below):
-#   "plugin": [["file:///abs/path/to/semantic-memory/integrations/opencode", {"url": "http://127.0.0.1:9000"}]]
 
 # optional: TUI sidebar panel (recent memory injections, Ctrl+X B to view).
 # TUI plugin discovery only accepts directories/symlinks:
@@ -238,6 +235,9 @@ can also be configured right where it is declared in `opencode.json` —
 precedence: **env var > plugin options > default**:
 
 ```jsonc
+// NOTE (2026-10-21): the declare-with-options form below is dev-runtime
+// (0.0.0-dev-*) ONLY — opencode v2.0.32 does not support it (verified; use
+// the MEMORY_PLUGIN_* env vars on production v2.0.32).
 {
   "plugin": [
     ["file:///path/to/semantic-memory/integrations/opencode",

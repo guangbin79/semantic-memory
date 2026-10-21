@@ -22,6 +22,8 @@ import os
 from pathlib import Path
 from typing import Any, Final
 
+from . import gpu_breaker
+
 from .embedder import _pid_vram_on_gpu, _preload_cuda_libs
 from .modelslot import ModelSlot
 
@@ -258,8 +260,13 @@ class Distiller:
                                 del e["supersedes"]
                 return entries
             except _GpuInferenceError as exc:
+                # CUDA 熔断：损坏模型禁入 GC（free 即 abort，2026-10-21 实证
+                # evict 解引用后的任意 GC 时刻延迟引爆）——墓场保活＋熔断，
+                # 第二轮 CPU 重建重试一次（designed 降级链保留）
+                gpu_breaker.quarantine(model)
+                gpu_breaker.trip(f"distill CUDA error: {exc}")
                 self._force_cpu = True
-                log.warning("GPU 蒸馏失败（%s）——CPU 重建重试", exc)
+                log.warning("GPU 蒸馏失败（%s）——熔断＋CPU 重建重试", exc)
                 self._slot.evict("distill")  # 解引用损坏的 GPU 槽模型（不销毁）
             except Exception as exc:
                 log.warning("蒸馏失败（%s: %s）——原文转直存", type(exc).__name__, exc)

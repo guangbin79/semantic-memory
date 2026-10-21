@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from semantic_memory.reranker import Reranker, format_prompt
+from semantic_memory import gpu_breaker
 
 SYS_SENTENCE = (
     "Judge whether the Document meets the requirements based on the Query and "
@@ -73,6 +74,13 @@ def gguf(tmp_path) -> Path:
 def make_reranker(monkeypatch, gguf, mock, device="cpu", budget_ms=500) -> Reranker:
     monkeypatch.setattr(Reranker, "_new_model", lambda self, use_gpu: mock)
     return Reranker(gguf, device=device, budget_ms=budget_ms)
+
+
+@pytest.fixture(autouse=True)
+def _clean_breaker():
+    gpu_breaker.reset_for_test()
+    yield
+    gpu_breaker.reset_for_test()
 
 
 def test_prompt_template_official_shape(monkeypatch, gguf):

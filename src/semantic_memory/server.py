@@ -32,6 +32,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from .web import INDEX_HTML
 
 from ._compat import HAS_NUMPY, INSTALL_HINT
+from . import gpu_breaker
 from .cloud import Consolidator
 from .config import Config
 from .db import MemoryStore
@@ -214,6 +215,9 @@ def _recall_hits(query: str, limit: int, project: str | None, global_limit: int)
 def rest_health() -> dict:
     s = store.stats()
     out = {"status": "ok", "embedder": embedder.available, "device": embedder.device, **s}
+    if gpu_breaker.tripped():
+        # CUDA 熔断：模型路径全部 fail-open（BM25 召回），重启恢复
+        out["gpu_degraded"] = gpu_breaker.reason()
     if not HAS_NUMPY:
         out["install_hint"] = INSTALL_HINT  # 无 numpy 时出现，有 numpy 时绝不出现
     return out

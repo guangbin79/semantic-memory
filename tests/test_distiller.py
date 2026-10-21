@@ -11,7 +11,16 @@ from pathlib import Path
 
 import pytest
 
+from semantic_memory import gpu_breaker
 from semantic_memory.distiller import SYSTEM_PROMPT, Distiller, format_prompt
+
+
+@pytest.fixture(autouse=True)
+def _clean_breaker():
+    # 蒸馏 GPU 失败分支会 trip 全局熔断器——测试后复位，不泄漏给后续
+    gpu_breaker.reset_for_test()
+    yield
+    gpu_breaker.reset_for_test()
 
 
 class MockDistillModel:

@@ -112,9 +112,6 @@ opencode v2（唯一进程内集成）：
 cp integrations/opencode/memory.ts ~/.config/opencode/plugins/
 # 插件目录的 package.json 需有 @opencode/plugin（仅类型）：
 #   cd ~/.config/opencode && npm install @opencode/plugin@^2.0.28
-# ——或不复制，直接在 opencode.jsonc 的 plugin 数组声明，可附带插件
-#   options（见下文"配置"一节）：
-#   "plugin": [["file:///abs/path/to/semantic-memory/integrations/opencode", {"url": "http://127.0.0.1:9000"}]]
 
 # 可选：TUI 侧边栏面板（最近记忆注入，Ctrl+X B 查看）。
 # TUI 插件发现只认目录/软链：
@@ -219,6 +216,9 @@ wal_checkpoint，逐文件 sha256 校验，旧服务还在跑则拒迁，旧目�
 options > 默认值**：
 
 ```jsonc
+// 注意（2026-10-21）：下方"声明带 options"形态仅 dev 运行时
+// （0.0.0-dev-*）可用——opencode v2.0.32 不支持（已实证；生产 v2.0.32
+// 请用 MEMORY_PLUGIN_* 环境变量）。
 {
   "plugin": [
     ["file:///path/to/semantic-memory/integrations/opencode",

@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Final
 
 from ._compat import INSTALL_HINT, HAS_NUMPY, np, npt
+from . import gpu_breaker
 
 log = logging.getLogger("semantic_memory.embedder")
 
@@ -199,10 +200,19 @@ class Embedder:
         """文档侧：原文嵌入 -> (n, 1024) float32 行归一化；不可用返回 None。
 
         全程持 _infer_lock：Llama 实例非线程安全，并发推理是进程死级竞态。
+        CUDA 熔断：已熔断或本次 CUDA 类错误 → 损坏模型入墓场（禁入 GC——
+        free 会 abort）＋CPU 重建重试一次；重试再败才返回 None
+        （BM25 召回降级存活，/health gpu_degraded 可观测）。
         """
         if not self.available or not texts:
             return None
+        if gpu_breaker.tripped():
+            return None
         with self._infer_lock:
+            if gpu_breaker.tripped():
+                # 锁内复检：并发场景下他线程可能在持锁期间熔断（本项目已实证
+                # 并发 embed＋flush）——锁上阻塞进入者不得在损坏上下文上重建
+                return None
             self._ensure_loaded()
             texts = [clamp_embed_text(t) for t in texts]
             try:
@@ -210,8 +220,17 @@ class Embedder:
             except Exception as exc:
                 if self.device != "cuda":
                     raise
+                # CUDA 熔断：损坏模型入墓场（禁入 GC——free 即 abort）＋
+                # CPU 重建重试一次；重试再败 → 保持熔断、放弃向量（BM25 降级）
+                gpu_breaker.quarantine(self._model)
+                gpu_breaker.trip(f"embed CUDA error: {exc}")
+                self._model = None
                 self._rebuild_on_cpu(exc)
-                mat = self._embed_all(texts)
+                try:
+                    mat = self._embed_all(texts)
+                except Exception as exc2:
+                    log.warning("embed CPU 重建后仍失败（%s）——放弃向量", exc2)
+                    return None
         return _l2_normalized(mat)
 
     def embed_query(self, text: str) -> npt.NDArray[np.float32] | None:

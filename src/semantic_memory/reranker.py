@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Final
 
 from .embedder import _pid_vram_on_gpu, _preload_cuda_libs
+from . import gpu_breaker
 from .modelslot import ModelSlot
 
 log = logging.getLogger("semantic_memory.reranker")
@@ -213,9 +214,14 @@ class Reranker:
         """
         if not self.available or not candidates:
             return None
+        if gpu_breaker.tripped():
+            return None  # CUDA 熔断：不再触碰 llama（BM25 召回保活）
         deadline = time.monotonic() + self.budget_ms / 1000.0
         for _attempt in range(2):  # 第二轮仅用于 GPU 推理失败后的 CPU 重建重试
             try:
+                # 无 trip 后复检：acquire 后的复检会杀死 in-call CPU 重试
+                # （trip 于第 1 轮置位→复检命中→重试永不发生，2026-10-21 实测）——
+                # 竞态窗口有意接受，勿加回复检
                 model = self._slot.acquire("rerank", self._load)
             except Exception as exc:
                 log.warning("重排模型加载失败（%s: %s）", type(exc).__name__, exc)
@@ -223,9 +229,14 @@ class Reranker:
             try:
                 return self._score_all(model, query, candidates, deadline)
             except _GpuInferenceError as exc:
+                # CUDA 熔断：损坏模型禁入 GC（free 即 abort，2026-10-21 实证
+                # evict 解引用后的任意 GC 时刻延迟引爆）——墓场保活＋熔断，
+                # 第二轮 CPU 重建重试一次（designed 降级链保留）
+                gpu_breaker.quarantine(model)
+                gpu_breaker.trip(f"rerank CUDA error: {exc}")
                 self._force_cpu = True
-                log.warning("GPU 重排失败（%s）——CPU 重建重试", exc)
-                self._slot.evict("rerank")  # 解引用损坏的 GPU 槽模型（不销毁）
+                log.warning("GPU 重排失败（%s）——熔断＋CPU 重建重试", exc)
+                self._slot.evict("rerank")
             except Exception as exc:
                 log.warning("重排失败（%s: %s）——保 RRF 序 fail-open", type(exc).__name__, exc)
                 return None

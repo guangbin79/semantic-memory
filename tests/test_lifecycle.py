@@ -6,6 +6,7 @@ import pytest
 
 np = pytest.importorskip("numpy")  # 零依赖基座：无 numpy 时整模块跳过
 
+from semantic_memory import gpu_breaker
 from semantic_memory.db import MemoryStore
 from semantic_memory.embedder import Embedder
 from semantic_memory.distiller import Distiller
@@ -24,6 +25,14 @@ def store(tmp_path):
     s = MemoryStore(tmp_path / "t.db")
     yield s
     s.close()
+
+
+@pytest.fixture(autouse=True)
+def _clean_breaker():
+    # 熔断器是全局模块态：trip 过的测试必须复位，否则泄漏给后续 flush/embed 测试
+    gpu_breaker.reset_for_test()
+    yield
+    gpu_breaker.reset_for_test()
 
 
 @pytest.fixture()
@@ -64,6 +73,7 @@ def test_flush_failclosed_leaves_pending_on_distill_error(store):
     report = flush_distill_queue(store, _StubDistiller(available=True, fail=True))
     assert report["left_pending"] == 1
     assert store.distill_pending() == 1
+    gpu_breaker.reset_for_test()  # 熔断态不泄漏给后续测试
 
 
 def test_flush_typed_happy_path(store):
@@ -366,6 +376,7 @@ def test_distill_failure_falls_back_raw(store):
     report = flush_distill_queue(store, FakeDistiller(entries=None))
     assert report == {"typed": 0, "stored_raw": 1, "left_pending": 0, "dropped": 0}
     assert store.stats()["total"] == 1
+    gpu_breaker.reset_for_test()  # 桩未配 configured → 不 trip；防御性复位
 
 
 def test_distill_exception_failclosed_leaves_pending(store):
@@ -383,6 +394,7 @@ def test_distill_exception_failclosed_leaves_pending(store):
     report = flush_distill_queue(store, BoomDistiller())
     assert report == {"typed": 0, "stored_raw": 0, "left_pending": 1, "dropped": 0}
     assert store.distill_pending() == 1
+    gpu_breaker.reset_for_test()  # 熔断态不泄漏给后续测试
 
 
 def test_flush_empty_queue(store):

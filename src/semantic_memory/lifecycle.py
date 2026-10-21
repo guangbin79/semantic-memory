@@ -14,6 +14,8 @@ import time
 import uuid
 from typing import Final
 
+from . import gpu_breaker
+
 from ._compat import np
 
 from .db import INSERT_MEMORY_SQL, MemoryStore, content_hash
@@ -199,6 +201,10 @@ def flush_distill_queue(
             ).fetchall()
             if not rows:
                 return {"typed": 0, "stored_raw": 0, "left_pending": 0, "dropped": 0}
+            if gpu_breaker.tripped():
+                # 已熔断：无裁判可依（触碰蒸馏可能 abort）——原文直存排空，
+                # fail-open 唯一兜底（捕获过滤器上游已挡 harness 噪音）
+                distiller = None
             if distiller is not None and not distiller.is_available() and distiller.configured:
                 # fail-closed：已配置但暂不可用（模型加载失败等）→ 留 pending 重试，
                 # 裁判失联期的 raw 直存正是 2026-10-20 噪音洪水的放大器。
@@ -218,7 +224,12 @@ def flush_distill_queue(
                         result = distiller.distill(texts, project or "",
                                                    neighbors or None)
                         if result is None:
-                            # Distiller 内部 fail-open 契约：None＝"我判不了"，按约原文直存
+                            # None 的来源含 GPU 级失败（已配置时）→ 熔断；未配置
+                            # （configured=False）属于无裁判模式，raw 直存不熔断。
+                            # 取舍：熔断偏粗——解析类质量波动也会降级 BM25 直到
+                            # 重启，但可观测（/health gpu_degraded）且换取确定性存活
+                            if getattr(distiller, "configured", False):
+                                gpu_breaker.trip(f"distill returned None: project={project!r}")
                             entries_by_project[project] = None
                         elif result == []:
                             # SYSTEM_PROMPT 契约："Output [] when nothing is worth
@@ -233,6 +244,7 @@ def flush_distill_queue(
                             entries_by_project[project] = result
                     except Exception:
                         log.exception("distill 失败，%d 条留待下次 flush", len(texts))
+                        gpu_breaker.trip(f"distill exception: project={project!r}")
                         failed_projects.add(project)
 
             now = time.time()
