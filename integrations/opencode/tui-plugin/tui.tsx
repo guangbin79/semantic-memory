@@ -18,6 +18,7 @@ type Inj = { ts: number; hook: string; project: string | null; chars: number; bl
 export function SidebarMemory(props: { context: Plugin.Context; sessionID: string }) {
   const [rows, setRows] = createSignal<Inj[]>([])
   const [degraded, setDegraded] = createSignal<string | null>(null)
+  const [online, setOnline] = createSignal<boolean | null>(null)
   const theme = props.context.theme
 
   const refresh = async () => {
@@ -26,8 +27,11 @@ export function SidebarMemory(props: { context: Plugin.Context; sessionID: strin
       if (h.ok) {
         const hd = await h.json()
         setDegraded(hd.gpu_degraded ?? null)
+        setOnline(true)
+      } else {
+        setOnline(false)
       }
-    } catch { /* 服务离线：保持旧态，下轮再试 */ }
+    } catch { setOnline(false) /* 服务离线：保持旧态，下轮再试（rows/degraded 不动） */ }
     try {
       const res = await fetch(
         `${SERVICE}/api/injections?session_id=${encodeURIComponent(props.sessionID)}&limit=${MAX_ROWS}`,
@@ -84,6 +88,12 @@ export function SidebarMemory(props: { context: Plugin.Context; sessionID: strin
             </Show>
           </box>
         )}
+      </Show>
+      {/* 零命中是相关性召回的常态而非故障，空白会被误读为「插件未加载」——如实显示已连接零态 */}
+      <Show when={!degraded() && online() && !latest()}>
+        <box>
+          <text fg={theme.text.muted}>semantic-memory · 已连接 · 本会话无相关记忆注入</text>
+        </box>
       </Show>
     </>
   )
