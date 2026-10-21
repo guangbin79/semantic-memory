@@ -30,9 +30,9 @@ from .modelslot import ModelSlot
 
 log = logging.getLogger("semantic_memory.distiller")
 
-DISTILL_N_CTX: Final = 8192   # 输入可含整段压缩 transcript（~8000 字符）+ 输出预算
+DISTILL_N_CTX: Final = 4096   # 6GB 卡显存适配（2026-10-21）：Q4 权重 1.05G＋KV 4096 ≈ 2.1G < 空闲 2.7G；输入截 2500 字符
 MAX_NEW_TOKENS: Final = 1024  # 一批 ≤20 条的 JSON 数组输出预算
-MAX_INPUT_CHARS: Final = 5000  # 输入截断：中文 ~1 token/字，n_ctx 8192 需留 system+近邻+输出预算
+MAX_INPUT_CHARS: Final = 2500  # 与 n_ctx 4096 配套（中文 ~1 token/字：2500 输入＋system＋1024 输出 < 4096）
 IM_END: Final = "<|im_end|>"
 VALID_KINDS: Final = ("fact", "decision", "preference", "artifact")
 VALID_SCOPES: Final = ("project", "global")
