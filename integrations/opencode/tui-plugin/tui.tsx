@@ -7,7 +7,7 @@
 //   ln -s ~/semantic-memory/integrations/opencode/tui-plugin ~/.config/opencode/plugins/semantic-memory-tui
 // 入口约定：Host.resolve 把目录下 ./tui 解析为本文件（tui.tsx）。
 import { Plugin } from "@opencode/plugin/tui"
-import { createSignal, For, onCleanup, onMount, Show } from "solid-js"
+import { createSignal, onCleanup, onMount, Show } from "solid-js"
 
 const SERVICE = (process.env.MEMORY_PLUGIN_URL ?? "http://127.0.0.1:8765").replace(/\/$/, "")
 const POLL_MS = 5000
@@ -50,12 +50,22 @@ export function SidebarMemory(props: { context: Plugin.Context; sessionID: strin
     return rows().find((r) => r.ts > cutoff && r.hook !== "compaction-reset")
   }
 
+  const [view, updateView] = props.context.storage.store("open", { initial: { open: true } })
+
   return (
     <Show when={latest()}>
       {(inj) => (
         <box>
-          <text fg={theme.text.muted}>{rel(inj().ts)} · {inj().project ?? "-"} · {inj().hook}</text>
-          <text fg={theme.text.base}>{inj().block ?? ""}</text>
+          <box flexDirection="row" gap={1}>
+            <text onMouseDown={() => void updateView((draft) => { draft.open = !draft.open }).catch(() => {})}>
+              {view.open ? "▼" : "▶"}
+            </text>
+            <text fg={theme.text.base}><b>上下文注入</b></text>
+            <text fg={theme.text.muted}>{rel(inj().ts)} · {inj().project ?? "-"} · {inj().hook}</text>
+          </box>
+          <Show when={view.open}>
+            <text fg={theme.text.base}>{inj().block ?? ""}</text>
+          </Show>
         </box>
       )}
     </Show>
