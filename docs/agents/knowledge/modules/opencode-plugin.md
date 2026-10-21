@@ -37,8 +37,6 @@
 - **Fix:** cp 至 plugins/ ＋ config 目录 bun add ＋ 删 file:// 条目 ＋ autostart 环境变量 ＋ service restart
 - **Prevention:** 插件加载失败全程静默——存在性探针＝当前会话工具列表是否含 `memory_store`/`memory_recall`；npm test（mock harness）全绿不代表真机加载路径通；改动后三步验证：service restart → 看工具列表 → 服务死后看 injections 是否恢复增长
 
-## Bug Experiences
-
 ### 服务反复静默死亡：并发推理无互斥（GGML abort，2026-10-20）
 - **Id:** opencode-plugin/ggml-concurrent-inference
 - **Source:** session ses_ea6ef6d57ffewSnefsn5aJbOWb（2026-10-20）；serve.log `GGML_ASSERT(out_ids==n_outputs)`
@@ -46,6 +44,14 @@
 - **Root cause:** ThreadingHTTPServer 多请求线程并发调用同一非线程安全 `llama_cpp.Llama`（llama_decode 释放 GIL；Embedder 独居 ModelSlot 槽外，`_load_lock` 只护首载不护推理）→ C 层数据竞争 abort。**首修走了弯路：误判为超窗输入**——库 `embed()` 默认 `truncate=True` 截 n_batch=512 token，超长输入直调库存活；零共享终闸 R2 以并发复现（3 线程 exit 135）推翻
 - **Fix:** `Embedder._infer_lock` 全程互斥（_ensure_loaded＋embed＋CPU 重建）；字符钳制 6000 保留为纵深防御
 - **Prevention:** 涉及非线程安全 C 库的请求路径，首载锁≠推理锁；并发回归测试必须防「空转绿」——桩测试经 `__new__` 绕过 `__init__` 时锁属性缺失会让线程崩在锁前、桩从未执行、收集断言空转 PASS（R3 教训：须补锁属性＋进入计数 `len(calls)==N` 断言，并以摘锁红/装锁绿双向实证）
+
+### injectTail 裸字符串 content 崩会话（2026-10-21）
+- **Id:** opencode-plugin/injecttail-content-shape
+- **Source:** session ses_ea6ef6d57ffewSnefsn5aJbOWb（2026-10-21）
+- **Symptom:** 真实记忆入库后所有会话随机 "Session failed"（core A.content.map）；headless 评审通道全灭
+- **Root cause:** `injectTail` 注入 `{role:"user", content: block}`——v2 消息契约 content 须为 part 数组；触发条件＝服务在线＋召回有命中（服务长期离线时 bug 休眠，探针假阴）
+- **Fix:** content 改 `[{type:"text",text:block}]`；3 连跑 standalone＋真机会话实证
+- **Prevention:** 钩子 mutate `event.messages/system` 必须走 part 数组形状；「测试绿」要先问「bug 触发条件在测试环境是否成立」——休眠型 bug 的绿灯是假灯；配套采集黑名单 `HARNESS_NOISE_RE` 挡 harness 横幅入库（六胞胎噪音实证）
 
 ## Open Questions
 

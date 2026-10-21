@@ -42,6 +42,18 @@ def test_injections_expand(client):
     assert "memories" not in plain[0]
 
 
+def test_injections_session_scope(client):
+    # 会话归属＋块全文：面板按当前会话过滤、展示实际注入内容
+    client.post("/inject/report", json={
+        "harness": "opencode", "hook": "context", "uids": [],
+        "session_id": "s1", "block": "<semantic-memory>\n· 欠债门时间轴化\n</semantic-memory>"})
+    client.post("/inject/report", json={
+        "harness": "opencode", "hook": "context", "uids": [], "session_id": "s2", "block": "other"})
+    rows = client.get("/api/injections", params={"session_id": "s1"}).json()["injections"]
+    assert len(rows) == 1 and rows[0]["block"].startswith("<semantic-memory>")
+    assert client.get("/api/injections", params={"session_id": "s3"}).json()["injections"] == []
+
+
 def test_report_validation(client):
     assert client.post("/inject/report", json={"uids": "notalist"}).status_code == 400
     assert client.post("/inject/report", json={"uids": [1, 2]}).status_code == 400

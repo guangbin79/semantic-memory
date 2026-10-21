@@ -37,7 +37,7 @@
  * 3. 注入必须同时注册 context/compaction/generate 三个钩子，
  *    否则压缩请求丢失注入并打穿 prefix cache（superpowers#2391 教训）；
  * 4. 注入方式（v2 线）：默认 tail——向 event.messages 末条 user 消息前一位
- *    splice {role:"user", content: block}（末条非 user→append 末尾）；
+ *    splice {role:"user", content:[{type:"text",text:block}]}（末条非 user→append 末尾；content 须为 part 数组）；
  *    MEMORY_PLUGIN_INJECT_POSITION=system 回退旧行为 event.system.push。
  *    另有每会话冻结头块（偏好/决策 top2，字节冻结）常驻 event.system。
  *    召回集合未变化（uid 集合哈希，按会话键控）时不重复注入，保证注入块
@@ -292,6 +292,10 @@ function partsText(parts: unknown): string {
 
 const REMEMBER_RE = /(?:记住|请记住|remember)[:：]?\s*(.{10,500})/i;
 
+/** Harness 生成文案黑名单：自动化横幅不是用户知识，捕获即污染（2026-10-21 六胞胎噪音实证：
+ *  review-loop 触发器文本被 6 个并发会话各存一份并高频回流上下文）。 */
+const HARNESS_NOISE_RE = /^(work finished with unreviewed|the server restarted while|session failed|continue from where you left off|review scope:)/i;
+
 /** sessionID → /ingest session_id（入队与直存共用服务端列）。 */
 function sidOf(v: unknown): string | undefined {
   return v == null ? undefined : String(v);
@@ -392,9 +396,11 @@ async function buildHeadBlock(query: string, project: string | undefined): Promi
   return head.length ? formatBlock(head) : "";
 }
 
-/** 尾注落位：末条消息为 user 时插到它前面一位，否则追加末尾。 */
+/** 尾注落位：末条消息为 user 时插到它前面一位，否则追加末尾。
+ * content 必须是 part 数组（v2 消息契约）——裸字符串会让 core 的
+ * content.map 崩掉整个会话（2026-10-21 A.content.map 实证）。 */
 function injectTail(messages: Array<{ role: string; content: unknown }>, block: string): void {
-  const msg = { role: "user", content: block };
+  const msg = { role: "user", content: [{ type: "text", text: block }] };
   const last = messages.length - 1;
   if (last >= 0 && messages[last]?.role === "user") messages.splice(last, 0, msg);
   else messages.push(msg);
@@ -421,13 +427,15 @@ async function recallBlock(
  * 注入遥测上报（fire-and-forget，绝不阻塞注入链路）。
  * 召回≠注入——只有注入方知道这次真的注了，由插件上报而非服务端记召回。
  */
-function reportInjection(hook: string, r: { block: string; hits: Hit[]; query: string }, project: string | undefined): void {
+function reportInjection(hook: string, r: { block: string; hits: Hit[]; query: string }, project: string | undefined, sessionID: unknown): void {
   void post("/inject/report", {
     harness: "opencode",
     hook,
     query: r.query.slice(0, 500),
     uids: r.hits.map((h) => h.uid).slice(0, 50),
     chars: r.block.length,
+    block: r.block.slice(0, 2000), // 侧边栏面板展示注入全文用（服务端截 2000 兜底）
+    session_id: sidOf(sessionID),
     project,
   });
 }
@@ -502,7 +510,7 @@ async function control(ctx: StableCtx, options?: Record<string, unknown>): Promi
             } else {
               injectTail(event.messages, r.block);
             }
-            reportInjection(hook, r, project);
+            reportInjection(hook, r, project, event.sessionID);
           }
         };
       }
@@ -538,6 +546,7 @@ async function control(ctx: StableCtx, options?: Record<string, unknown>): Promi
         const text = event.prompt?.text ?? "";
         if (await captureRemember(text, project, event.sessionID)) return;
         const trimmed = text.trim();
+        if (HARNESS_NOISE_RE.test(trimmed)) return; // harness 横幅不进记忆库
         if (trimmed.length < 40) return;
         const st = stateOf(event.sessionID);
         st.chatSeen ??= new Set();
@@ -629,7 +638,7 @@ async function control(ctx: StableCtx, options?: Record<string, unknown>): Promi
         const r = await recallBlock(text, project, st);
         if (r && Array.isArray(output?.parts)) {
           output.parts.push({ type: "text", text: r.block, synthetic: true });
-          reportInjection("chat.message", r, project);
+          reportInjection("chat.message", r, project, input?.sessionID);
         }
       },
       /** 压缩：重置注入去重（dev 线拿不到会话文本，托管落库仅 stable 线）。 */

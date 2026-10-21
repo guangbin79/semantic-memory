@@ -263,6 +263,7 @@ def api_injections(q: dict) -> dict | tuple[int, dict]:
         project=q.get("project") or None,
         limit=limit,
         offset=offset,
+        session_id=q.get("session_id") or None,
     )
     if q.get("expand") == "1":
         # 侧边栏/面板预览：uids→记忆摘要批量展开（cap 500 防 IN 参数越界）
@@ -450,6 +451,9 @@ def inject_report(body: dict) -> tuple[int, dict]:
         uids=uids,
         chars=chars,
         project=body.get("project"),
+        # 可选扩展：会话归属（面板按当前会话过滤）＋注入块全文（截 2000，record_injection 再兜底）
+        session_id=body.get("session_id") if isinstance(body.get("session_id"), str) else None,
+        block=body.get("block") if isinstance(body.get("block"), str) else None,
     )
     # 落入 stale_candidates 被留存误清（评审 R1-C2 修正）
     for i in range(0, len(uids), 50):

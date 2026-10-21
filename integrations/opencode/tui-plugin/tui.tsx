@@ -1,6 +1,6 @@
-// TUI 侧边栏面板：显示最近的记忆注入（semantic-memory 服务遥测）。
+// TUI 侧边栏面板：显示**当前会话**实际注入进上下文的记忆块（semantic-memory 服务遥测）。
 // 挂载点：sidebar.content 槽（与内置 Todo 面板同机制，@opencode/plugin/tui）。
-// 数据源：GET /api/injections?expand=1（uids→记忆摘要服务端展开），5s 轮询。
+// 数据源：GET /api/injections?session_id=<本会话>（注入上报携带的块全文），5s 轮询。
 // 设计约束：纯只读展示——不往模型上下文加任何内容，服务离线时静默保持旧态。
 //
 // 安装（目录形态，TUI 发现只认目录/软链）：
@@ -11,10 +11,9 @@ import { createSignal, For, onCleanup, onMount, Show } from "solid-js"
 
 const SERVICE = (process.env.MEMORY_PLUGIN_URL ?? "http://127.0.0.1:8765").replace(/\/$/, "")
 const POLL_MS = 5000
-const MAX_ROWS = 5
+const MAX_ROWS = 20
 
-type InjMemory = { uid: string; kind: string; project: string | null; preview: string }
-type Inj = { ts: number; hook: string; project: string | null; query: string; memories?: InjMemory[] }
+type Inj = { ts: number; hook: string; project: string | null; chars: number; block: string | null }
 
 export function SidebarMemory(props: { context: Plugin.Context; sessionID: string }) {
   const [rows, setRows] = createSignal<Inj[]>([])
@@ -23,7 +22,9 @@ export function SidebarMemory(props: { context: Plugin.Context; sessionID: strin
 
   const refresh = async () => {
     try {
-      const res = await fetch(`${SERVICE}/api/injections?limit=${MAX_ROWS}&expand=1`)
+      const res = await fetch(
+        `${SERVICE}/api/injections?session_id=${encodeURIComponent(props.sessionID)}&limit=${MAX_ROWS}`,
+      )
       if (!res.ok) return
       const data = await res.json()
       setRows(data.injections ?? [])
@@ -51,14 +52,13 @@ export function SidebarMemory(props: { context: Plugin.Context; sessionID: strin
             {view.open ? "▼" : "▶"}
           </text>
           <text fg={theme.text.base}><b>记忆注入</b></text>
+          <text fg={theme.text.muted}>{rows().length}</text>
         </box>
         <Show when={view.open}>
           <For each={rows()}>{(inj) => (
             <box paddingLeft={2}>
-              <text fg={theme.text.muted}>{rel(inj.ts)} · {inj.project ?? "-"} · {inj.hook}</text>
-              <For each={inj.memories ?? []}>{(m) => (
-                <text fg={theme.text.base}>· {m.preview}</text>
-              )}</For>
+              <text fg={theme.text.muted}>{rel(inj.ts)} · {inj.project ?? "-"} · {inj.hook} · {inj.chars}c</text>
+              <text fg={theme.text.base}>{inj.block ?? ""}</text>
             </box>
           )}</For>
         </Show>

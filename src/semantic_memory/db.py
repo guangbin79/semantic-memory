@@ -247,6 +247,11 @@ class MemoryStore:
             if need_count_backfill:
                 self.conn.execute(
                     "ALTER TABLE memories ADD COLUMN injection_count INTEGER NOT NULL DEFAULT 0")
+            # injections 扩展列：会话归属（面板按当前会话过滤）＋注入块全文预览（老库补列，幂等）
+            icols = {r[1] for r in self.conn.execute("PRAGMA table_info(injections)")}
+            for col, decl in (("session_id", "TEXT"), ("block", "TEXT")):
+                if col not in icols:
+                    self.conn.execute(f"ALTER TABLE injections ADD COLUMN {col} {decl}")
         if need_count_backfill:
             # 反哺计数回填：聚合 json_each 后逐行 UPDATE（legacy 行已由 _rebuild_fts 入索引，触发器安全）
             counts = self.conn.execute(
@@ -686,15 +691,18 @@ class MemoryStore:
         chars: int,
         project: str | None = None,
         ts: float | None = None,
+        session_id: str | None = None,
+        block: str | None = None,
     ) -> int:
         with self.conn:  # 事务块整体持锁：last_insert_rowid 不会与别的线程交错
             trimmed = uids[:50]
             self.conn.execute(
-                "INSERT INTO injections(ts, harness, hook, query, project, chars, uids)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO injections(ts, harness, hook, query, project, chars, uids, session_id, block)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (ts if ts is not None else time.time(),
                  harness[:64], hook[:64], query[:2000], project, max(0, int(chars)),
-                 json.dumps(trimmed)),
+                 json.dumps(trimmed), session_id[:128] if session_id else None,
+                 block[:2000] if block else None),
             )
             if trimmed:  # 反哺计数同事务自增：injection_counts 热路径免扫遥测表
                 marks = ",".join("?" * len(trimmed))
@@ -709,6 +717,7 @@ class MemoryStore:
         project: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        session_id: str | None = None,
     ) -> list[dict]:
         sql = "SELECT * FROM injections"
         cond, args = [], []
@@ -718,6 +727,9 @@ class MemoryStore:
         if project:
             cond.append("project = ?")
             args.append(project)
+        if session_id:
+            cond.append("session_id = ?")
+            args.append(session_id)
         if cond:
             sql += " WHERE " + " AND ".join(cond)
         sql += " ORDER BY ts DESC LIMIT ? OFFSET ?"
