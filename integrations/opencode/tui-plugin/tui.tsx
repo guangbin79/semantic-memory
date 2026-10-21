@@ -44,18 +44,25 @@ export function SidebarMemory(props: { context: Plugin.Context; sessionID: strin
     return `${Math.floor(s / 86400)}d`
   }
 
+  // 压缩语义：compaction-reset 行标记上下文重建点，其前的注入块已不在当前上下文——
+  // 只展示最后一个标记之后的注入，标记行自身不展示。
+  const visible = () => {
+    const cutoff = rows().reduce((acc, r) => (r.hook === "compaction-reset" ? Math.max(acc, r.ts) : acc), 0)
+    return rows().filter((r) => r.ts > cutoff && r.hook !== "compaction-reset")
+  }
+
   return (
-    <Show when={rows().length > 0}>
+    <Show when={visible().length > 0}>
       <box>
         <box flexDirection="row" gap={1}>
           <text onMouseDown={() => void updateView((draft) => { draft.open = !draft.open }).catch(() => {})}>
             {view.open ? "▼" : "▶"}
           </text>
           <text fg={theme.text.base}><b>记忆注入</b></text>
-          <text fg={theme.text.muted}>{rows().length}</text>
+          <text fg={theme.text.muted}>{visible().length}</text>
         </box>
         <Show when={view.open}>
-          <For each={rows()}>{(inj) => (
+          <For each={visible()}>{(inj) => (
             <box paddingLeft={2}>
               <text fg={theme.text.muted}>{rel(inj.ts)} · {inj.project ?? "-"} · {inj.hook} · {inj.chars}c</text>
               <text fg={theme.text.base}>{inj.block ?? ""}</text>

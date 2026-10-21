@@ -196,6 +196,8 @@ interface SessionState {
   lastInjectHash: string;
   /** 冻结头块字节：undefined=未计算（服务不可达时下个钩子重试），""=已算且为空 */
   head: string | undefined;
+  /** 头块已上报标记：冻结头块对上下文影响最持久，须单独上报一次供面板展示 */
+  headReported?: boolean;
   chatSeen?: Set<string>;
   chatCount?: number;
 }
@@ -501,6 +503,12 @@ async function control(ctx: StableCtx, options?: Record<string, unknown>): Promi
           if (cfg.headBlock && st.head === undefined) {
             const q = firstUserText(event);
             if (q) st.head = await buildHeadBlock(q, project);
+            // 冻结头块单独上报一次（hook=context.head）：它常驻 system、
+            // 是对上下文影响最持久的注入——面板须可见。
+            if (st.head && !st.headReported) {
+              st.headReported = true;
+              reportInjection("context.head", { block: st.head, hits: [], query: q ?? "" }, project, event.sessionID);
+            }
           }
           if (st.head) event.system.push({ type: "text", text: st.head });
           const r = await recallBlock(recentUserText(event), project, st);
@@ -525,6 +533,12 @@ async function control(ctx: StableCtx, options?: Record<string, unknown>): Promi
        */
       await ctx.session.hook("compaction", async (event) => {
         if (!(await ensureService())) return;
+        // 压缩标记行（hook=compaction-reset）：上下文被摘要重建，旧注入块失效——
+        // 面板以此为界只展示标记后的注入。先于 transcript 长度判断，压缩发生即标记。
+        void post("/inject/report", {
+          harness: "opencode", hook: "compaction-reset", query: "", uids: [],
+          chars: 0, session_id: sidOf(event.sessionID), project,
+        });
         const text = transcriptText(event);
         if (text.length < 40) return;
         await post("/ingest", {
