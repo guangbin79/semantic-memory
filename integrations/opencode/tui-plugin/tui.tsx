@@ -11,13 +11,12 @@ import { createSignal, For, onCleanup, onMount, Show } from "solid-js"
 
 const SERVICE = (process.env.MEMORY_PLUGIN_URL ?? "http://127.0.0.1:8765").replace(/\/$/, "")
 const POLL_MS = 5000
-const MAX_ROWS = 20
+const MAX_ROWS = 5
 
 type Inj = { ts: number; hook: string; project: string | null; chars: number; block: string | null }
 
 export function SidebarMemory(props: { context: Plugin.Context; sessionID: string }) {
   const [rows, setRows] = createSignal<Inj[]>([])
-  const [view, updateView] = props.context.storage.store("open", { initial: { open: true } })
   const theme = props.context.theme
 
   const refresh = async () => {
@@ -44,32 +43,21 @@ export function SidebarMemory(props: { context: Plugin.Context; sessionID: strin
     return `${Math.floor(s / 86400)}d`
   }
 
-  // 压缩语义：compaction-reset 行标记上下文重建点，其前的注入块已不在当前上下文——
-  // 只展示最后一个标记之后的注入，标记行自身不展示。
-  const visible = () => {
+  // 用户只关心最后一次请求注入了什么：取最新一条；若其后发生过压缩（上下文重建），
+  // 则该注入已不在上下文——无可示。
+  const latest = () => {
     const cutoff = rows().reduce((acc, r) => (r.hook === "compaction-reset" ? Math.max(acc, r.ts) : acc), 0)
-    return rows().filter((r) => r.ts > cutoff && r.hook !== "compaction-reset")
+    return rows().find((r) => r.ts > cutoff && r.hook !== "compaction-reset")
   }
 
   return (
-    <Show when={visible().length > 0}>
-      <box>
-        <box flexDirection="row" gap={1}>
-          <text onMouseDown={() => void updateView((draft) => { draft.open = !draft.open }).catch(() => {})}>
-            {view.open ? "▼" : "▶"}
-          </text>
-          <text fg={theme.text.base}><b>记忆注入</b></text>
-          <text fg={theme.text.muted}>{visible().length}</text>
+    <Show when={latest()}>
+      {(inj) => (
+        <box>
+          <text fg={theme.text.muted}>{rel(inj().ts)} · {inj().project ?? "-"} · {inj().hook}</text>
+          <text fg={theme.text.base}>{inj().block ?? ""}</text>
         </box>
-        <Show when={view.open}>
-          <For each={visible()}>{(inj) => (
-            <box paddingLeft={2}>
-              <text fg={theme.text.muted}>{rel(inj.ts)} · {inj.project ?? "-"} · {inj.hook} · {inj.chars}c</text>
-              <text fg={theme.text.base}>{inj.block ?? ""}</text>
-            </box>
-          )}</For>
-        </Show>
-      </box>
+      )}
     </Show>
   )
 }

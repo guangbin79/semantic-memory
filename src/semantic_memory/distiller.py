@@ -157,6 +157,11 @@ class Distiller:
     def is_available(self) -> bool:
         return self.available
 
+    @property
+    def configured(self) -> bool:
+        """是否配置了裁判模型（路径级；与加载可用性无关——用于区分未配置与暂不可用）。"""
+        return self._gguf_path is not None
+
     # ---------- 加载与回退（镜像 reranker.py 的链路） ----------
 
     def _new_model(self, use_gpu: bool) -> Any:

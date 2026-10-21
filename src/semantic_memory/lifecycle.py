@@ -86,7 +86,13 @@ def enqueue_raw(
 
     chat/compaction 类来源由 rest_ingest 路由至此（热路径零 LLM）；显式
     remember / tool capture 保持直存语义，不经此路。flush 前持久，崩溃不丢。
+    跨项目捕获去重：同 content_hash 已存在于任一项目则跳过——自动捕获
+    非项目权威知识，先捕先得，其余项目经全局桶召回（2026-10-21 六胞胎
+    噪音实证：同 harness 横幅被 6 个并发会话按 project 各存一份）。
     """
+    h = content_hash(content)
+    if store.content_exists(h) or store.pending_queue_has(h):
+        return store.distill_pending()
     return store.distill_enqueue(content, source, project, session_id)
 
 
@@ -175,9 +181,11 @@ def flush_distill_queue(
     蒸馏输出 supersedes → 新条先插入，旧条 superseded_by=新 uid；③其余 ADD。
     scope=global → project 置 NULL（全局域），与 project 域互不判重；
     新条向量随插写入（embedder 未配则缺者经 backfill 追平）。蒸馏按
-    project 分组（提示词需要单一 project 上下文）；Distiller 未配置/
-    不可用/失败/返回空 → 该组原文按 kind=fact 直存（status=stored_raw，
-    现状行为不变差）。session_id 沿用队列行。
+    project 分组（提示词需要单一 project 上下文）；Distiller 未配置 →
+    该组原文按 kind=fact 直存（无裁判时的唯一兜底，否则队列成黑洞）；
+    **已配置但不可用/失败/输出异常 → fail-closed：整组留 pending 待下次
+    flush（2026-10-21 实证：fail-open raw 直存在裁判失联期制造噪音洪水，
+    distill_queue_len 经 /health 可观测，不会静默黑洞）。session_id 沿用队列行。
     """
     if not _flush_lock.acquire(blocking=False):
         return {"skipped": "flush already running"}
@@ -190,28 +198,45 @@ def flush_distill_queue(
                 " FROM distill_queue WHERE status='pending' ORDER BY id"
             ).fetchall()
             if not rows:
-                return {"typed": 0, "stored_raw": 0}
+                return {"typed": 0, "stored_raw": 0, "left_pending": 0, "dropped": 0}
+            if distiller is not None and not distiller.is_available() and distiller.configured:
+                # fail-closed：已配置但暂不可用（模型加载失败等）→ 留 pending 重试，
+                # 裁判失联期的 raw 直存正是 2026-10-20 噪音洪水的放大器。
+                # 未配置（configured=False）走下方 fail-open 原文直存（无裁判时的唯一兜底）。
+                return {"typed": 0, "stored_raw": 0, "dropped": 0,
+                        "left_pending": len(rows), "skipped": "distiller unavailable"}
 
-            # 蒸馏结果按 project 分组缓存；任何失败路径收敛为 None（原文直存）
+            # 蒸馏结果按 project 分组缓存；失败项目收敛进 failed_projects（留 pending）
             entries_by_project: dict = {}
-            if distiller is not None and distiller.is_available():
+            failed_projects: set = set()
+            dropped_projects: set = set()  # SYSTEM_PROMPT 契约：[]＝该组全部不值得记
+            if distiller is not None:
                 for project in {r["project"] for r in rows}:
                     texts = [r["content"] for r in rows if r["project"] == project]
                     neighbors = _band_neighbors(store, embedder, texts, project)
                     try:
                         result = distiller.distill(texts, project or "",
                                                    neighbors or None)
-                        if result is not None and len(result) != len(texts):
-                            log.warning("distill 输出 %d 条 ≠ 输入 %d 条，无逐条对应，整组转直存",
-                                        len(result), len(texts))
-                            result = None
-                        entries_by_project[project] = result
+                        if result is None:
+                            # Distiller 内部 fail-open 契约：None＝"我判不了"，按约原文直存
+                            entries_by_project[project] = None
+                        elif result == []:
+                            # SYSTEM_PROMPT 契约："Output [] when nothing is worth
+                            # remembering"——合法的整组丢弃裁决，行标记 done
+                            dropped_projects.add(project)
+                        elif len(result) != len(texts):
+                            log.warning("distill 输出 %d 条 ≠ 输入 %d 条，"
+                                        "%d 条留待下次 flush",
+                                        len(result), len(texts), len(texts))
+                            failed_projects.add(project)
+                        else:
+                            entries_by_project[project] = result
                     except Exception:
-                        log.exception("distill 失败，%d 条原文转直存", len(texts))
-                        entries_by_project[project] = None
+                        log.exception("distill 失败，%d 条留待下次 flush", len(texts))
+                        failed_projects.add(project)
 
             now = time.time()
-            report = {"typed": 0, "stored_raw": 0}
+            report = {"typed": 0, "stored_raw": 0, "left_pending": 0}
             batch: list[tuple[str, int]] = []        # (队列 status, 队列 id)
             inserts: list[tuple] = []                # memories 行参数
             vecs: list[tuple[str, np.ndarray]] = []  # (uid, 向量)
@@ -250,7 +275,16 @@ def flush_distill_queue(
                 supersedes.clear()
                 batch.clear()
 
+            dropped = 0
+            left_pending = 0
             for r in rows:
+                if r["project"] in failed_projects:
+                    left_pending += 1  # fail-closed：留 pending 待下次 flush
+                    continue
+                if r["project"] in dropped_projects:
+                    batch.append(("done", r["id"]))  # 蒸馏裁决：全部不值得记
+                    dropped += 1
+                    continue
                 entries = entries_by_project.get(r["project"])
                 entry = entries.pop(0) if entries else None
                 if entry is None:
@@ -295,6 +329,8 @@ def flush_distill_queue(
                     commit()
             if batch:
                 commit()
+            report["left_pending"] = left_pending
+            report["dropped"] = dropped
             return report
         finally:
             conn.close()

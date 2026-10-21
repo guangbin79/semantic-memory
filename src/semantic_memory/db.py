@@ -750,6 +750,20 @@ class MemoryStore:
             for r in rows
         }
 
+    def content_exists(self, h: str) -> bool:
+        """全局内容哈希存在性（跨项目捕获去重用）。"""
+        return self.conn.execute(
+            "SELECT 1 FROM memories WHERE content_hash=? AND deleted=0 LIMIT 1", (h,)
+        ).fetchone() is not None
+
+    def pending_queue_has(self, h: str) -> bool:
+        """pending 蒸馏队列同 hash 内容检查（队列无哈希列，逐条现算；量小可接受）。"""
+        return any(
+            content_hash(r["content"]) == h
+            for r in self.conn.execute(
+                "SELECT content FROM distill_queue WHERE status='pending'")
+        )
+
     def injection_counts(self, uids: list[str]) -> dict[str, int]:
         """给定 uid 集合的历史注入次数（遥测反哺排序用）。
 

@@ -1,5 +1,6 @@
 """生命周期维护测试：去重、purge、TTL、使用度留存、backfill、既有库迁移。"""
 import time
+from pathlib import Path
 
 import pytest
 
@@ -28,6 +29,62 @@ def store(tmp_path):
 @pytest.fixture()
 def no_embedder():
     return Embedder(None)
+
+
+class _StubDistiller:
+    """flush 通路桩：is_available/distill 行为可配。"""
+
+    configured = True  # 类属性：未配置语义用 Distiller(None) 或显式置 False
+
+    def __init__(self, available=True, outputs=None, fail=False):
+        self._available = available
+        self.outputs = outputs
+        self.fail = fail
+
+    def is_available(self):
+        return self._available
+
+    def distill(self, texts, project, neighbors=None):
+        if self.fail:
+            raise RuntimeError("boom")
+        return self.outputs
+
+
+def test_flush_failclosed_leaves_pending_when_unavailable(store):
+    # 已配置但不可用 → fail-closed：留 pending 重试（裁判失联期 raw 直存是噪音洪水放大器）
+    enqueue_raw(store, "横向内容 A" * 10, "chat", "pA")
+    enqueue_raw(store, "横向内容 B" * 10, "chat", "pB")
+    report = flush_distill_queue(store, _StubDistiller(available=False))
+    assert report["left_pending"] == 2 and report["stored_raw"] == 0
+    assert store.distill_pending() == 2
+
+
+def test_flush_failclosed_leaves_pending_on_distill_error(store):
+    enqueue_raw(store, "报错组内容", "chat", "pA")
+    report = flush_distill_queue(store, _StubDistiller(available=True, fail=True))
+    assert report["left_pending"] == 1
+    assert store.distill_pending() == 1
+
+
+def test_flush_typed_happy_path(store):
+    enqueue_raw(store, "被蒸馏的原始文本", "chat", "pA")
+    d = _StubDistiller(available=True, outputs=[
+        {"content": "蒸馏后的决策", "kind": "decision", "scope": "project", "tags": []},
+    ])
+    report = flush_distill_queue(store, d)
+    assert report["typed"] == 1 and report["left_pending"] == 0
+    rows = store.list_recent(project="pA", limit=5)
+    assert any(r["content"] == "蒸馏后的决策" and r["kind"] == "decision" for r in rows)
+
+
+def test_enqueue_cross_project_dedup(store):
+    # 六胞胎噪音回归：同文横幅被多项目会话各存一份 → 跨项目去重只留第一份
+    enqueue_raw(store, "完全相同的横幅文本", "chat", "pA")
+    assert store.distill_pending() == 1
+    enqueue_raw(store, "完全相同的横幅文本", "chat", "pB")
+    assert store.distill_pending() == 1
+    enqueue_raw(store, "不同的另一条内容", "chat", "pB")
+    assert store.distill_pending() == 2
 
 
 class FakeEmbedder:
@@ -268,7 +325,7 @@ def test_idle_flush_stores_typed_facts(store):
          "rationale": "跨项目有效", "tags": []},
     ])
     report = flush_distill_queue(store, fake)
-    assert report == {"typed": 2, "stored_raw": 0}
+    assert report == {"typed": 2, "stored_raw": 0, "left_pending": 0, "dropped": 0}
     rows = store.conn.execute(
         "SELECT content, kind, project, session_id, source FROM memories ORDER BY id"
     ).fetchall()
@@ -291,7 +348,7 @@ def test_distiller_unavailable_falls_back_raw(store):
     """验收：Distiller 不可用（未配模型）→ 原文直存 stored_raw，现状行为不变差。"""
     enqueue_raw(store, "无模型时期的原始文本", "compaction", "proj-b", "sess-2")
     report = flush_distill_queue(store, Distiller(None))
-    assert report == {"typed": 0, "stored_raw": 1}
+    assert report == {"typed": 0, "stored_raw": 1, "left_pending": 0, "dropped": 0}
     row = store.conn.execute(
         "SELECT content, kind, source, project, session_id FROM memories"
     ).fetchone()
@@ -307,12 +364,12 @@ def test_distill_failure_falls_back_raw(store):
     """蒸馏返回 None（解析失败 fail-open）→ 该组原文直存。"""
     enqueue_raw(store, "蒸馏失败的原始文本", "chat", "p", None)
     report = flush_distill_queue(store, FakeDistiller(entries=None))
-    assert report == {"typed": 0, "stored_raw": 1}
+    assert report == {"typed": 0, "stored_raw": 1, "left_pending": 0, "dropped": 0}
     assert store.stats()["total"] == 1
 
 
-def test_distill_exception_falls_back_raw(store):
-    """蒸馏抛异常 → flush 不崩，该组原文直存。"""
+def test_distill_exception_failclosed_leaves_pending(store):
+    """蒸馏抛异常 → fail-closed：留 pending 待下次 flush（裁判失联期 raw 直存是噪音洪水放大器）。"""
     class BoomDistiller:
         available = True
 
@@ -324,11 +381,12 @@ def test_distill_exception_falls_back_raw(store):
 
     enqueue_raw(store, "异常路径原文", "chat", "p", None)
     report = flush_distill_queue(store, BoomDistiller())
-    assert report == {"typed": 0, "stored_raw": 1}
+    assert report == {"typed": 0, "stored_raw": 0, "left_pending": 1, "dropped": 0}
+    assert store.distill_pending() == 1
 
 
 def test_flush_empty_queue(store):
-    assert flush_distill_queue(store, None) == {"typed": 0, "stored_raw": 0}
+    assert flush_distill_queue(store, None) == {"typed": 0, "stored_raw": 0, "left_pending": 0, "dropped": 0}
 
 
 def test_flush_commits_in_batches(store):
@@ -354,14 +412,15 @@ def test_cli_distill_falls_back_raw(tmp_path):
     enqueue_raw(s, "CLI 蒸馏缓冲原文", "compaction", "proj-c", "sess-3")
     s.close()
     env = {**os.environ, "MEMORY_DB_PATH": str(db),
-           "MEMORY_MODEL_PATH": "", "MEMORY_DISTILL_MODEL": ""}
+           "MEMORY_MODEL_PATH": "", "MEMORY_DISTILL_MODEL": "",
+           "PYTHONPATH": str(Path("src").resolve())}  # 防陈旧 site-packages：CLI 子进程跑 src 现行码
     proc = subprocess.run(
         [sys.executable, "-m", "semantic_memory.server", "distill"],
         capture_output=True, text=True, env=env, timeout=120,
     )
     assert proc.returncode == 0, proc.stderr
     report = json.loads(proc.stdout)
-    assert report == {"typed": 0, "stored_raw": 1}
+    assert report == {"typed": 0, "stored_raw": 1, "left_pending": 0, "dropped": 0}
     s2 = MemoryStore(db)
     assert s2.stats()["total"] == 1
     assert s2.conn.execute(
@@ -410,7 +469,7 @@ def test_contradiction_supersedes_old(store):
          "rationale": "新选择", "tags": [], "supersedes": [old]},
     ])
     report = flush_distill_queue(store, fake, embedder=emb)
-    assert report == {"typed": 1, "stored_raw": 0}
+    assert report == {"typed": 1, "stored_raw": 0, "left_pending": 0, "dropped": 0}
     # 近邻带上下文随同一次蒸馏调用进入提示词（无二次 LLM）
     assert fake.calls == [(["用户改口：偏好 uv"], "p", [(old, "偏好 pip 装依赖")])]
     rows = store.conn.execute(
@@ -430,7 +489,7 @@ def test_near_duplicate_touches(store):
         {"content": "团队统一用 pnpm 管理依赖", "kind": "preference",
          "scope": "project", "rationale": "一致性", "tags": []},
     ])
-    assert flush_distill_queue(store, fake, embedder=emb) == {"typed": 1, "stored_raw": 0}
+    assert flush_distill_queue(store, fake, embedder=emb) == {"typed": 1, "stored_raw": 0, "left_pending": 0, "dropped": 0}
     assert store.stats()["total"] == 1  # 无新行
     row = store.conn.execute(
         "SELECT last_recalled_at FROM memories WHERE uid=?", (old,)).fetchone()
@@ -449,7 +508,7 @@ def test_global_entries_dedup_in_null_domain(store):
         {"content": "用户偏好深色主题", "kind": "preference",
          "scope": "global", "rationale": "跨项目", "tags": []},
     ])
-    assert flush_distill_queue(store, f1, embedder=emb) == {"typed": 1, "stored_raw": 0}
+    assert flush_distill_queue(store, f1, embedder=emb) == {"typed": 1, "stored_raw": 0, "left_pending": 0, "dropped": 0}
     row = store.conn.execute("SELECT uid, project FROM memories").fetchone()
     assert row["project"] is None  # scope=global → project IS NULL（全局域）
     enqueue_raw(store, "raw-b", "chat", "proj-b", None)
@@ -457,7 +516,7 @@ def test_global_entries_dedup_in_null_domain(store):
         {"content": "用户偏好深色主题配色", "kind": "preference",
          "scope": "global", "rationale": "跨项目", "tags": []},
     ])
-    assert flush_distill_queue(store, f2, embedder=emb) == {"typed": 1, "stored_raw": 0}
+    assert flush_distill_queue(store, f2, embedder=emb) == {"typed": 1, "stored_raw": 0, "left_pending": 0, "dropped": 0}
     assert store.stats()["total"] == 1  # 后者 touch，无双插
     assert f2.calls[0][2] is None  # 原文域 proj-b 无近邻——两域互不判重
 
@@ -473,7 +532,7 @@ def test_band_neighbor_without_supersedes_adds(store):
         {"content": "新事实：服务端口 9000", "kind": "fact",
          "scope": "project", "rationale": "", "tags": []},
     ])
-    assert flush_distill_queue(store, fake, embedder=emb) == {"typed": 1, "stored_raw": 0}
+    assert flush_distill_queue(store, fake, embedder=emb) == {"typed": 1, "stored_raw": 0, "left_pending": 0, "dropped": 0}
     assert store.stats()["total"] == 2  # ADD：不取代也不 touch
     assert fake.calls[0][2] == [(old, "旧事实：服务端口 8765")]
     assert store.get_many([old])[0]["uid"] == old  # 旧条未被取代
@@ -486,6 +545,15 @@ def test_no_embedder_degrades_to_hash_dedup(store):
     dup_entry = {"content": "同一句结论", "kind": "fact", "scope": "project",
                  "rationale": "", "tags": []}
     fake = FakeDistiller(entries=[dup_entry, dict(dup_entry)])
-    assert flush_distill_queue(store, fake, embedder=None) == {"typed": 2, "stored_raw": 0}
+    assert flush_distill_queue(store, fake, embedder=None) == {"typed": 2, "stored_raw": 0, "left_pending": 0, "dropped": 0}
     assert store.stats()["total"] == 1  # 第二条哈希命中 → touch 不插入
     assert fake.calls[0][2] is None
+
+
+def test_flush_drop_all_marks_done(store):
+    # SYSTEM_PROMPT 契约：distill 返回 []＝整组不值得记 → 行标记 done 不堆积
+    enqueue_raw(store, "不值得一记的横幅 A", "chat", "pA")
+    enqueue_raw(store, "不值得一记的横幅 B", "chat", "pB")
+    report = flush_distill_queue(store, _StubDistiller(available=True, outputs=[]))
+    assert report == {"typed": 0, "stored_raw": 0, "left_pending": 0, "dropped": 2}
+    assert store.distill_pending() == 0 and store.stats()["total"] == 0

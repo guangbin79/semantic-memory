@@ -45,6 +45,14 @@
 - **Fix:** `Embedder._infer_lock` 全程互斥（_ensure_loaded＋embed＋CPU 重建）；字符钳制 6000 保留为纵深防御
 - **Prevention:** 涉及非线程安全 C 库的请求路径，首载锁≠推理锁；并发回归测试必须防「空转绿」——桩测试经 `__new__` 绕过 `__init__` 时锁属性缺失会让线程崩在锁前、桩从未执行、收集断言空转 PASS（R3 教训：须补锁属性＋进入计数 `len(calls)==N` 断言，并以摘锁红/装锁绿双向实证）
 
+### 捕获过滤器 ^ 锚定失配（2026-10-21）
+- **Id:** opencode-plugin/harness-noise-anchor
+- **Source:** session ses_ea6ef6d57ffewSnefsn5aJbOWb（2026-10-21）；R2 终闸 2/7 漏检实证
+- **Symptom:** HARNESS_NOISE_RE 上线后 09:53 仍有 "Work finished…" 横幅入库（该项目 7 条代理提示词噪音漏 2）
+- **Root cause:** 过滤器 `^` 锚定 trim 后首字符——横幅前常缀注入块/引号等前导内容，锚定必失配
+- **Fix:** 去 `^` 改子串匹配（模式特异足够，误伤面＝讨论这些字面量的会话被保守跳过捕获，可接受）
+- **Prevention:** 内容过滤器禁用行首锚定——注入文本的“位置”不可假设（前缀可以是任意上下文）
+
 ### injectTail 裸字符串 content 崩会话（2026-10-21）
 - **Id:** opencode-plugin/injecttail-content-shape
 - **Source:** session ses_ea6ef6d57ffewSnefsn5aJbOWb（2026-10-21）

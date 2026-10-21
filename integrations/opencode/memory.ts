@@ -292,14 +292,17 @@ function partsText(parts: unknown): string {
   return "";
 }
 
-const REMEMBER_RE = /(?:记住|请记住|remember)[:：]?\s*(.{10,500})/i;
+export const REMEMBER_RE = /(?:记住|请记住|\bremember\b)[:：]?\s*(.{10,500})/i;
 
 /** Harness 生成文案黑名单：自动化横幅不是用户知识，捕获即污染（2026-10-21 六胞胎噪音实证：
- *  review-loop 触发器文本被 6 个并发会话各存一份并高频回流上下文）。 */
-const HARNESS_NOISE_RE = /^(work finished with unreviewed|the server restarted while|session failed|continue from where you left off|review scope:)/i;
+ *  review-loop 触发器文本被 6 个并发会话各存一份并高频回流上下文）。
+ *  子串匹配（无 ^ 锚）：横幅前常缀注入块/引号，锚定必失配（2026-10-21 R2 实证 2/7 漏检）。
+ *  已知边界：headless 代理任务提示词（issue-agent 派发/终闸评审）无法穷举——结构性修法
+ *  （交互/非交互会话区分）待上游能力，见知识页 Open Questions。 */
+export const HARNESS_NOISE_RE = /(work finished with unreviewed|the server restarted while|session failed|continue from where you left off|review scope:|you are a subagent|你是零共享终闸评审者)/i;
 
 /** sessionID → /ingest session_id（入队与直存共用服务端列）。 */
-function sidOf(v: unknown): string | undefined {
+export function sidOf(v: unknown): string | undefined {
   return v == null ? undefined : String(v);
 }
 
@@ -334,7 +337,7 @@ async function captureRemember(text: string, project: string | undefined, sessio
  * 典型 prompt-injection 模式：工具产物若含有，不写入记忆库——
  * 否则它会被再次注入别的会话，形成跨会话污染。
  */
-const INJECTION_RE =
+export const INJECTION_RE =
   /ignore\s+(all\s+)?(previous|above|prior)\s+instructions?|忽略(之前|以上|所有|先前)的?(指令|指示)|<\/?system\s*>|you\s+are\s+now\s+(a|an|in)\b|disregard\s+(all\s+)?(previous|above)/i;
 
 /** 工具产物捕获（两条加载线共用）。 */
@@ -401,7 +404,7 @@ async function buildHeadBlock(query: string, project: string | undefined): Promi
 /** 尾注落位：末条消息为 user 时插到它前面一位，否则追加末尾。
  * content 必须是 part 数组（v2 消息契约）——裸字符串会让 core 的
  * content.map 崩掉整个会话（2026-10-21 A.content.map 实证）。 */
-function injectTail(messages: Array<{ role: string; content: unknown }>, block: string): void {
+export function injectTail(messages: Array<{ role: string; content: unknown }>, block: string): void {
   const msg = { role: "user", content: [{ type: "text", text: block }] };
   const last = messages.length - 1;
   if (last >= 0 && messages[last]?.role === "user") messages.splice(last, 0, msg);
@@ -561,6 +564,7 @@ async function control(ctx: StableCtx, options?: Record<string, unknown>): Promi
         if (await captureRemember(text, project, event.sessionID)) return;
         const trimmed = text.trim();
         if (HARNESS_NOISE_RE.test(trimmed)) return; // harness 横幅不进记忆库
+        if (INJECTION_RE.test(trimmed)) return; // 注入模式文本不捕获（与工具路径同策略）
         if (trimmed.length < 40) return;
         const st = stateOf(event.sessionID);
         st.chatSeen ??= new Set();
