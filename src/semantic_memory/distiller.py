@@ -131,6 +131,10 @@ def _parse(raw: str) -> list[dict] | None:
     return [e for e in (_normalize(x) for x in data) if e is not None]
 
 
+class DistillParseError(Exception):
+    """裁判输出无法解析为条目数组——输出抖动而非硬件损坏（禁触发全局熔断）。"""
+
+
 class _GpuInferenceError(Exception):
     """GPU 推理失败（触发 CPU 重建、整次调用重试一次）。"""
 
@@ -238,7 +242,11 @@ class Distiller:
         self, texts: list[str], project: str,
         neighbors: list[tuple[str, str]] | None = None,
     ) -> list[dict] | None:
-        """一批原文 → typed 条目数组；任何失败路径 → None（fail-open）。
+        """一批原文 → typed 条目数组。
+
+        硬件类失败（加载失败等）→ None（调用方据 configured 熔断）；
+        解析抖动（输出无 JSON 数组）→ DistillParseError（调用方 fail-closed
+        留 pending，不熔断——2026-10-22 实证一次抖动曾 trip 全局 16h）。
 
         neighbors 为同域近邻 (uid, content) 上下文：非空时提示词附带
         "是否取代"问答，取代关系经条目 supersedes 字段一并返回。"""
@@ -252,6 +260,8 @@ class Distiller:
                 return None
             try:
                 entries = _parse(self._generate(model, texts, project, neighbors))
+                if entries is None:
+                    raise DistillParseError("输出不含可解析的 JSON 数组")
                 if entries:  # supersedes 白名单无条件生效：无近邻时 allowed 为空集全部剥离（防模型对任意 uid 发 supersede）
                     allowed = {uid for uid, _ in (neighbors or [])}
                     for e in entries:
@@ -271,6 +281,8 @@ class Distiller:
                 self._force_cpu = True
                 log.warning("GPU 蒸馏失败（%s）——熔断＋CPU 重建重试", exc)
                 self._slot.evict("distill")  # 解引用损坏的 GPU 槽模型（不销毁）
+            except DistillParseError:
+                raise  # 输出抖动≠硬件损坏：fail-closed 留 pending，禁 trip 全局熔断
             except Exception as exc:
                 log.warning("蒸馏失败（%s: %s）——原文转直存", type(exc).__name__, exc)
                 return None

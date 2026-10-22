@@ -7,3 +7,4 @@
 | 模块 | 一句话描述 | 详细路径 |
 |------|-----------|----------|
 | opencode-plugin | opencode 集成插件：安装正道（plugins/ 目录）、静默加载失败的根因/修复/存在性探针 | `./docs/agents/knowledge/modules/opencode-plugin.md` |
+| gpu-breaker | CUDA 熔断器与蒸馏失败语义：解析抖动不熔断、trip 原因字串诊断、日志强制落盘 | `./docs/agents/knowledge/modules/gpu-breaker.md` |

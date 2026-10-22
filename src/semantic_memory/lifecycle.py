@@ -19,7 +19,7 @@ from . import gpu_breaker
 from ._compat import np
 
 from .db import INSERT_MEMORY_SQL, MemoryStore, content_hash
-from .distiller import Distiller
+from .distiller import DistillParseError, Distiller
 from .embedder import Embedder
 
 log = logging.getLogger("semantic_memory.lifecycle")
@@ -224,10 +224,9 @@ def flush_distill_queue(
                         result = distiller.distill(texts, project or "",
                                                    neighbors or None)
                         if result is None:
-                            # None 的来源含 GPU 级失败（已配置时）→ 熔断；未配置
+                            # None＝硬件类失败（加载失败/响应异常；解析抖动走
+                            # DistillParseError 不经此路）→ 已配置即熔断；未配置
                             # （configured=False）属于无裁判模式，raw 直存不熔断。
-                            # 取舍：熔断偏粗——解析类质量波动也会降级 BM25 直到
-                            # 重启，但可观测（/health gpu_degraded）且换取确定性存活
                             if getattr(distiller, "configured", False):
                                 gpu_breaker.trip(f"distill returned None: project={project!r}")
                             entries_by_project[project] = None
@@ -242,6 +241,13 @@ def flush_distill_queue(
                             failed_projects.add(project)
                         else:
                             entries_by_project[project] = result
+                    except DistillParseError as exc:
+                        # 解析抖动（输出无 JSON）：硬件无损 → 不熔断。fail-closed
+                        # 留 pending 待下次 flush（2026-10-22 实证：一次抖动曾
+                        # trip 全局熔断器，停注入 16h 直到手动重启）
+                        log.warning("蒸馏输出解析失败（%s），%d 条留待下次 flush",
+                                    exc, len(texts))
+                        failed_projects.add(project)
                     except Exception:
                         log.exception("distill 失败，%d 条留待下次 flush", len(texts))
                         gpu_breaker.trip(f"distill exception: project={project!r}")

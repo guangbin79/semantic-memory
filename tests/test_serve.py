@@ -76,6 +76,23 @@ def test_random_port_discovery(tmp_path):
     assert not disc.exists()
 
 
+def test_server_log_written_to_file(tmp_path):
+    """日志落盘（AC4）：autostart spawn 用 stdio:"ignore" 丢 stderr——
+    熔断原因等诊断信息必须同时进文件，否则熔断不可诊断（2026-10-22 实证）。"""
+    logfile = tmp_path / "logs" / "server.log"
+    disc = tmp_path / "discover.json"
+    proc = _spawn(tmp_path, {"MEMORY_LOG_FILE": str(logfile)})
+    try:
+        info = _wait_discovery(disc, proc)
+        with urllib.request.urlopen(f"{info['url']}/health", timeout=5) as r:
+            assert json.loads(r.read())["status"] == "ok"
+        assert logfile.exists(), "serve 启动后日志文件必须已落盘"
+        assert "db=" in logfile.read_text(encoding="utf-8")
+    finally:
+        proc.send_signal(signal.SIGTERM)
+        proc.communicate(timeout=30)
+
+
 def test_fixed_port_still_works(tmp_path):
     import socket
     with socket.socket() as s:  # 先探一个空闲端口作为"固定"端口（避免与环境的占用冲突）

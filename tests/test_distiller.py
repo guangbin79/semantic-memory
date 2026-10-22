@@ -12,7 +12,12 @@ from pathlib import Path
 import pytest
 
 from semantic_memory import gpu_breaker
-from semantic_memory.distiller import SYSTEM_PROMPT, Distiller, format_prompt
+from semantic_memory.distiller import (
+    SYSTEM_PROMPT,
+    DistillParseError,
+    Distiller,
+    format_prompt,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -127,10 +132,14 @@ def test_decision_without_rationale_downgrades_to_fact(monkeypatch, gguf, caplog
     '[{"content": "x", "kind": "decision"',  # 截断 JSON
     "```",                          # 围栏无内容
 ])
-def test_bad_json_fail_open(monkeypatch, gguf, raw):
+def test_bad_json_raises_parse_error(monkeypatch, gguf, raw):
+    # 解析失败＝输出抖动（硬件无损）→ 抛 DistillParseError 交调用方 fail-closed
+    # 留 pending；不触发熔断（2026-10-22 实证：一次抖动 trip 全局熔断器 16h）。
     mock = MockDistillModel(outputs=[raw])
     d = make_distiller(monkeypatch, gguf, mock)
-    assert d.distill(["原文"], "p") is None  # fail-open：调用方原文直存
+    with pytest.raises(DistillParseError):
+        d.distill(["原文"], "p")
+    assert not gpu_breaker.tripped()
 
 
 def test_non_dict_entries_dropped(monkeypatch, gguf):

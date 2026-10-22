@@ -9,7 +9,7 @@ np = pytest.importorskip("numpy")  # 零依赖基座：无 numpy 时整模块跳
 from semantic_memory import gpu_breaker
 from semantic_memory.db import MemoryStore
 from semantic_memory.embedder import Embedder
-from semantic_memory.distiller import Distiller
+from semantic_memory.distiller import DistillParseError, Distiller
 from semantic_memory.lifecycle import (
     backfill_vectors,
     enqueue_raw,
@@ -394,6 +394,36 @@ def test_distill_exception_failclosed_leaves_pending(store):
     report = flush_distill_queue(store, BoomDistiller())
     assert report == {"typed": 0, "stored_raw": 0, "left_pending": 1, "dropped": 0}
     assert store.distill_pending() == 1
+    gpu_breaker.reset_for_test()  # 熔断态不泄漏给后续测试
+
+
+def test_flush_parse_error_leaves_pending_without_trip(store):
+    """解析抖动（输出无 JSON）→ fail-closed 留 pending，且不触发全局熔断。
+
+    2026-10-22 实证：一次解析失败 trip 全局熔断器，停注入 16h 直到手动重启。
+    """
+    class ParseBoomDistiller:
+        configured = True
+
+        def is_available(self):
+            return True
+
+        def distill(self, texts, project, neighbors=None):
+            raise DistillParseError("输出无 JSON 数组")
+
+    enqueue_raw(store, "解析抖动组原文", "chat", "p", None)
+    report = flush_distill_queue(store, ParseBoomDistiller())
+    assert report == {"typed": 0, "stored_raw": 0, "left_pending": 1, "dropped": 0}
+    assert store.distill_pending() == 1
+    assert not gpu_breaker.tripped()
+
+
+def test_flush_none_with_configured_trips(store):
+    """configured 且返回 None（硬件类失败）→ 照旧熔断＋该组原文直存（语义收窄回归钉）。"""
+    enqueue_raw(store, "硬件失败组原文", "chat", "p", None)
+    report = flush_distill_queue(store, _StubDistiller(available=True, outputs=None))
+    assert report["stored_raw"] == 1 and report["left_pending"] == 0
+    assert gpu_breaker.tripped() is True
     gpu_breaker.reset_for_test()  # 熔断态不泄漏给后续测试
 
 

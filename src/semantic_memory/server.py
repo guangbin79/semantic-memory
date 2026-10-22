@@ -26,6 +26,7 @@ import sys
 import threading
 import time
 from collections import deque
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -50,7 +51,7 @@ from .lifecycle import (
 )
 from .project import backfill_project_keys, resolve_project
 from .modelslot import ModelSlot
-from .paths import MigrationError, MigrationRefused, migrate_legacy
+from .paths import MigrationError, MigrationRefused, migrate_legacy, resolve_data_dir
 from .reranker import Reranker
 from .startup_gate import check_startup
 
@@ -949,9 +950,24 @@ _USAGE = """usage: semantic-memory [-h] [command]
 """
 
 
-def main() -> None:
-    logging.basicConfig(level=logging.INFO, stream=sys.stderr,
+def _setup_logging() -> None:
+    """stderr 之外强制落盘：autostart spawn 用 stdio:"ignore" 丢弃 stderr——
+    熔断原因等诊断信息必须进文件，否则熔断不可诊断（2026-10-22 实证 16h 盲态）。"""
+    handlers: list[logging.Handler] = [logging.StreamHandler(sys.stderr)]
+    raw = os.environ.get("MEMORY_LOG_FILE")
+    log_file = Path(raw) if raw else resolve_data_dir() / "logs" / "server.log"
+    try:
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        handlers.append(RotatingFileHandler(
+            log_file, maxBytes=5 * 2**20, backupCount=2))
+    except OSError:
+        log.warning("日志文件不可写（%s）——仅 stderr", log_file)
+    logging.basicConfig(level=logging.INFO, handlers=handlers,
                         format="%(asctime)s %(name)s %(levelname)s %(message)s")
+
+
+def main() -> None:
+    _setup_logging()
     args = sys.argv[1:]
     cmd = next((a for a in args if not a.startswith("-")), "serve")
     if cmd == "serve" and ("--help" in args or "-h" in args):
