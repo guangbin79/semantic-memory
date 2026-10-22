@@ -80,7 +80,7 @@ export function SidebarMemory(props: { context: Plugin.Context; sessionID: strin
           <box>
             <box flexDirection="row" gap={1}>
               <text onMouseDown={() => void updateView((draft) => { draft.open = !draft.open }).catch(() => {})}>
-                {view.open ? "▼" : "▶"}
+                {view.open ? "▼ " : "▶ "}{/* 尾随空格：▼ 东亚模糊宽度在 CJK 端终端占 2 格，吃掉 gap 单元 */}
               </text>
               <text fg={theme.text.base}><b>Context Injection</b></text>
               <text fg={theme.text.muted}>{rel(inj().ts)} · {inj().project ?? "-"} · {inj().hook}</text>
