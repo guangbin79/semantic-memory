@@ -1,6 +1,6 @@
 # opencode 集成插件（opencode-plugin）
 
-> Last updated: 2026-10-20 · 插件本体 `integrations/opencode/memory.ts`，装于 `~/.config/opencode/plugins/`；服务为独立 Python 进程（127.0.0.1:8765），插件仅是它的无状态 HTTP 客户端。
+> Last updated: 2026-10-22 · 插件本体 `integrations/opencode/memory.ts`，装于 `~/.config/opencode/plugins/`；服务为独立 Python 进程（127.0.0.1:8765），插件仅是它的无状态 HTTP 客户端。
 
 ## 架构要点
 
@@ -68,6 +68,22 @@
 - **Root cause:** `injectTail` 注入 `{role:"user", content: block}`——v2 消息契约 content 须为 part 数组；触发条件＝服务在线＋召回有命中（服务长期离线时 bug 休眠，探针假阴）
 - **Fix:** content 改 `[{type:"text",text:block}]`；3 连跑 standalone＋真机会话实证
 - **Prevention:** 钩子 mutate `event.messages/system` 必须走 part 数组形状；「测试绿」要先问「bug 触发条件在测试环境是否成立」——休眠型 bug 的绿灯是假灯；配套采集黑名单 `HARNESS_NOISE_RE` 挡 harness 横幅入库（六胞胎噪音实证）
+
+### 测试断言未随 injectTail content 契约更新（2026-10-22）
+- **Id:** opencode-plugin/test-stale-content-shape
+- **Source:** session ses_e9e924119ffeBlsCd4jvCVdxCW（2026-10-22）；review-loop R2 实证
+- **Symptom:** npm test 挂 test-hooks.mjs:177「注入块格式错误」——尾注已插入（173-175 过）但 `String(messages[0].content)` 得 "[object Object]"
+- **Root cause:** injectTail 5ada9d7 改 content 为 part 数组（崩会话修复），test-hooks.mjs 四处断言（176/324/363/559）仍按裸字符串读——产品契约先行、测试消费者未跟上
+- **Fix:** 测试加 `contentText(m)` 兼容读取（part 数组拼 text，字符串旧形直通），4 处换用
+- **Prevention:** 改钩子 mutate 形状（如 content part 数组化）时，grep 全仓该形状的消费点（含测试断言）同步更新；「上次绿」不作数——契约变了旧绿就是假绿
+
+### GPU 争用机器上 fixture 须禁重排/蒸馏（2026-10-22）
+- **Id:** opencode-plugin/fixture-gpu-contention
+- **Source:** session ses_e9e924119ffeBlsCd4jvCVdxCW（2026-10-22）；review-loop R1/R3 实证
+- **Symptom:** 跑 npm test 的 fixture 服务上，召回零注入（断言「应注入」红）＋ idle flush 轮询 ECONNRESET；直连 /recall 却有命中
+- **Root cause:** 实机 8765 服务占尽显存，fixture 剩 ~1.9GB：reranker llama_context 创建失败 → CUDA 熔断 trip → /recall 带 gpu_degraded → 插件按 00824d8 设计停注（假红真设计）；蒸馏器回退 CPU，长 transcript 蒸馏期间 stdlib 服务器阻塞 → 连接重置
+- **Fix:** fixture 起服务加 `MEMORY_RERANK_MODEL= MEMORY_DISTILL_MODEL=`（空串＝config.py 文档化显式禁用语义）；重排关→RRF 序直出，蒸馏关→flush raw 直存，两者测试断言均只依赖
+- **Prevention:** 熔断停注＝设计行为，「测试红」先分「代码回归 vs 熔断介入」——查 fixture 服务日志 gpu_degraded/熔断行；共享 GPU 的机器上跑集成测试一律显式降配模型面（embedder 轻可留 GPU，重排/蒸馏禁用）
 
 ## Open Questions
 

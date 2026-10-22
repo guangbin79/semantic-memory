@@ -110,6 +110,13 @@ function userEvent(text, sessionID) {
   return ev;
 }
 
+/** v2 消息 content 是 part 数组（injectTail 契约，2026-10-21）；兼容裸字符串旧形。 */
+function contentText(m) {
+  const c = m?.content;
+  return typeof c === "string" ? c : (c ?? []).map((p) => p?.text ?? "").join("");
+}
+
+
 // 注入遥测是 fire-and-forget，轮询等待上报落库
 async function waitInjection(project, hook, timeoutMs = 3000) {
   const deadline = Date.now() + timeoutMs;
@@ -173,7 +180,7 @@ await fire(hooks.session, "context", ev1);
 assert.equal(ev1.messages.length, 2, "context 钩子应向 messages 插入一条尾注");
 assert.equal(ev1.messages[1], ev1orig, "尾注应位于末条 user 消息之前一位");
 assert.equal(ev1.messages[0].role, "user", "尾注消息 role 应为 user");
-const ev1tail = String(ev1.messages[0].content);
+const ev1tail = contentText(ev1.messages[0]);
 assert.ok(ev1tail.includes("<semantic-memory>"), "注入块格式错误");
 assert.ok(ev1tail.includes("release/2026"), "注入块缺少召回内容");
 assert.ok(ev1tail.includes("以当前会话为准"), "优先级句缺失");
@@ -321,7 +328,7 @@ await post("/ingest", {
 });
 const escEv = userEvent("qzhij9escape 恶意");
 await fire(hooks.session, "context", escEv);
-const escBlock = [...escEv.system.map((s) => s.text), String(escEv.messages[0].content)].join("\n");
+const escBlock = [...escEv.system.map((s) => s.text), contentText(escEv.messages[0])].join("\n");
 assert.equal(
   (escBlock.match(/<\/semantic-memory>/g) || []).length, 2,
   "头块+尾注各应只剩包裹自身一个闭合标签（内容中的已被剥除）",
@@ -360,7 +367,7 @@ assert.ok(!head1.includes("qzhij9factnoise"), "负例: fact 不应进入头块")
 assert.ok(!head1.includes("qzhij9otherproj"), "负例: 跨项目 preference 不应进入头块");
 assert.equal(h1.messages.length, 2, "尾注应插入 messages");
 assert.equal(h1.messages[1], h1orig, "尾注位于末条 user 消息之前一位");
-assert.ok(String(h1.messages[0].content).includes("qzhij9globalpref"), "全局记忆应随 global_limit 进尾注");
+assert.ok(contentText(h1.messages[0]).includes("qzhij9globalpref"), "全局记忆应随 global_limit 进尾注");
 console.log("ok  冻结头块: preference top2 进头块，fact/跨项目负例均排除；全局记忆随 global_limit 接线");
 
 // 冻结：第二次请求头块字节相同；同集合尾注去重
@@ -556,7 +563,7 @@ await post("/inject/report", {
 });
   const xev = userEvent("qzhij9cross 种子条目", "s-cross");
   await fire(xctx.hooks.session, "context", xev);
-const xblock = xev.messages.map((m) => String(m.content)).join("");
+const xblock = xev.messages.map(contentText).join("");
 assert.ok(xblock.includes("qzhij9crossa"), "主结果：A 项目种子条目进尾注");
 assert.ok(
   xblock.includes("网关 5xx 即熔断重试的降级预案") && xblock.includes("(cross-project co_injection)"),
