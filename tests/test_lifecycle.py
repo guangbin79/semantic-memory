@@ -427,6 +427,50 @@ def test_flush_none_with_configured_trips(store):
     gpu_breaker.reset_for_test()  # 熔断态不泄漏给后续测试
 
 
+def test_flush_count_shortage_binds_typed_raws_deficit(store):
+    """短组（2 输入 1 输出）→ 首行 typed done，缺额行走既有 entry=None 原文直存。
+
+    模型本无逐条 1:1 契约；2026-10-23 live 实证条数守卫曾致整组留 pending、
+    队列积压 112 条——条数≠输入不再 fail 整组的回归钉。
+    """
+    enqueue_raw(store, "短缺组原文一", "chat", "p", None)
+    enqueue_raw(store, "短缺组原文二", "chat", "p", None)
+    report = flush_distill_queue(store, FakeDistiller(entries=[
+        {"content": "蒸馏出的唯一条目", "kind": "fact", "scope": "project", "tags": []},
+    ]))
+    assert report == {"typed": 1, "stored_raw": 1, "left_pending": 0, "dropped": 0}
+    rows = store.conn.execute(
+        "SELECT content, kind FROM memories ORDER BY id"
+    ).fetchall()
+    assert rows[0]["content"] == "蒸馏出的唯一条目" and rows[0]["kind"] == "fact"
+    assert rows[1]["content"] == "短缺组原文二" and rows[1]["kind"] == "fact"
+    statuses = [r["status"] for r in store.conn.execute(
+        "SELECT status FROM distill_queue ORDER BY id"
+    ).fetchall()]
+    assert statuses == ["done", "stored_raw"]
+
+
+def test_flush_count_overflow_truncates_and_binds(store):
+    """超组（2 输入 4 输出）→ 截断前 2 条按序绑定，超出条目丢弃，不再 fail 整组。"""
+    enqueue_raw(store, "超组原文一", "chat", "p", None)
+    enqueue_raw(store, "超组原文二", "chat", "p", None)
+    report = flush_distill_queue(store, FakeDistiller(entries=[
+        {"content": "绑定一", "kind": "fact", "scope": "project", "tags": []},
+        {"content": "绑定二", "kind": "decision", "scope": "project", "tags": []},
+        {"content": "超出三", "kind": "fact", "scope": "project", "tags": []},
+        {"content": "超出四", "kind": "fact", "scope": "project", "tags": []},
+    ]))
+    assert report == {"typed": 2, "stored_raw": 0, "left_pending": 0, "dropped": 0}
+    contents = [r["content"] for r in store.conn.execute(
+        "SELECT content FROM memories ORDER BY id"
+    ).fetchall()]
+    assert contents == ["绑定一", "绑定二"]  # 超出两条未落库
+    statuses = [r["status"] for r in store.conn.execute(
+        "SELECT status FROM distill_queue ORDER BY id"
+    ).fetchall()]
+    assert statuses == ["done", "done"]
+
+
 def test_flush_empty_queue(store):
     assert flush_distill_queue(store, None) == {"typed": 0, "stored_raw": 0, "left_pending": 0, "dropped": 0}
 

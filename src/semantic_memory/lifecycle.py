@@ -187,7 +187,11 @@ def flush_distill_queue(
     该组原文按 kind=fact 直存（无裁判时的唯一兜底，否则队列成黑洞）；
     **已配置但不可用/失败/输出异常 → fail-closed：整组留 pending 待下次
     flush（2026-10-21 实证：fail-open raw 直存在裁判失联期制造噪音洪水，
-    distill_queue_len 经 /health 可观测，不会静默黑洞）。session_id 沿用队列行。
+    distill_queue_len 经 /health 可观测，不会静默黑洞）；**输出条数≠输入
+    条数不 fail：超产 WARN+截断 result[:len(texts)] 按序绑定（超出条目丢
+    弃），短缺 WARN+缺额行走 entry=None 原文直存——模型本无逐条 1:1 契
+    约（2026-10-23 实证：条数守卫 fail 整组曾致队列积压 112 条）。
+    session_id 沿用队列行。
     """
     if not _flush_lock.acquire(blocking=False):
         return {"skipped": "flush already running"}
@@ -234,11 +238,21 @@ def flush_distill_queue(
                             # SYSTEM_PROMPT 契约："Output [] when nothing is worth
                             # remembering"——合法的整组丢弃裁决，行标记 done
                             dropped_projects.add(project)
-                        elif len(result) != len(texts):
-                            log.warning("distill 输出 %d 条 ≠ 输入 %d 条，"
-                                        "%d 条留待下次 flush",
-                                        len(result), len(texts), len(texts))
-                            failed_projects.add(project)
+                        elif len(result) > len(texts):
+                            # 超产：模型无逐条 1:1 契约 → 截断按序绑定，超出条目
+                            # 丢弃（2026-10-23 实证：条数守卫 fail 整组曾致队列
+                            # 积压 112 条，同 prompt 重试确定性复现等待无意义）
+                            log.warning("distill 输出 %d 条 > 输入 %d 条，截断超出 %d 条",
+                                        len(result), len(texts),
+                                        len(result) - len(texts))
+                            entries_by_project[project] = result[:len(texts)]
+                        elif len(result) < len(texts):
+                            # 短缺：前 len(result) 行按序绑定，缺额行经行循环
+                            # 既有 entry=None 路径原文直存（kind=fact、判重照旧）
+                            log.warning("distill 输出 %d 条 < 输入 %d 条，缺额 %d 行原文直存",
+                                        len(result), len(texts),
+                                        len(texts) - len(result))
+                            entries_by_project[project] = result
                         else:
                             entries_by_project[project] = result
                     except DistillParseError as exc:
