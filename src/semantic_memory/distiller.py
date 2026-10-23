@@ -30,9 +30,14 @@ from .modelslot import ModelSlot
 
 log = logging.getLogger("semantic_memory.distiller")
 
-DISTILL_N_CTX: Final = 4096   # 6GB 卡显存适配（2026-10-21）：Q4 权重 1.05G＋KV 4096 ≈ 2.1G < 空闲 2.7G；输入截 2500 字符
+DISTILL_N_CTX: Final = 4096   # 6GB 卡显存适配（2026-10-21）：Q4 权重 1.05G＋KV 4096 ≈ 2.1G < 空闲 2.7G；输入截 2000 字符
 MAX_NEW_TOKENS: Final = 1024  # 一批 ≤20 条的 JSON 数组输出预算
-MAX_INPUT_CHARS: Final = 2500  # 与 n_ctx 4096 配套（中文 ~1 token/字：2500 输入＋system＋1024 输出 < 4096）
+# gt-e696（2026-10-23 "4356≥4096" 全局熔断）：MEMORIES 近邻段曾无界拼接在批原文截断点
+# 之后，积压批数十条近邻（每条 ≤2000 字符全文）撑爆 n_ctx。预算算术：
+# 2000（批原文）＋600（近邻）＋~250（模板/指令/system）≈ 2850 tok < 4096。
+MAX_INPUT_CHARS: Final = 2000  # 批原文截断（与 n_ctx 4096 配套，中文 ~1 token/字）
+MAX_NEIGHBORS: Final = 6       # MEMORIES 段条数硬预算
+MAX_NEIGHBOR_CHARS: Final = 600  # MEMORIES 段总字符硬预算（含 "[uid] " 前缀与换行）
 IM_END: Final = "<|im_end|>"
 VALID_KINDS: Final = ("fact", "decision", "preference", "artifact")
 VALID_SCOPES: Final = ("project", "global")
@@ -57,18 +62,30 @@ def format_prompt(
 
     neighbors 为 (uid, content) 近邻对：非空时附 <<<MEMORIES>>> 段并列出
     取代条目的 supersedes 输出契约——取代裁决与内容提取共用同一次调用。
+    近邻段受 MAX_NEIGHBORS/MAX_NEIGHBOR_CHARS 硬预算（贪心装填，逐条计费）；
+    首条放不下预算时整段省略（含 supersedes 指令块），退化无近邻形态。
     """
     joined = "\n---\n".join(texts)[:MAX_INPUT_CHARS]
     user = f"Project: {project}\n<<<TEXT>>>\n{joined}\n<<<END>>>"
     if neighbors:
-        listed = "\n".join(f"[{uid}] {content}" for uid, content in neighbors)
-        user += (
-            "\n<<<MEMORIES>>>\n" + listed + "\n<<<END>>>"
-            '\nIf a new entry contradicts one of the memories above or makes it'
-            ' outdated, add a "supersedes" key to that entry: the array of'
-            ' replaced memory uids, e.g. "supersedes": ["<uid>"]. Omit'
-            ' "supersedes" when nothing is replaced.'
-        )
+        lines: list[str] = []
+        used = 0
+        for uid, content in neighbors[:MAX_NEIGHBORS]:
+            line = f"[{uid}] {content}"
+            cost = len(line) + (1 if lines else 0)  # 计入行间换行
+            if used + cost > MAX_NEIGHBOR_CHARS:
+                break
+            lines.append(line)
+            used += cost
+        if lines:  # 首条即超预算 → 整段省略，prompt 与无近邻形态逐字节一致
+            listed = "\n".join(lines)
+            user += (
+                "\n<<<MEMORIES>>>\n" + listed + "\n<<<END>>>"
+                '\nIf a new entry contradicts one of the memories above or makes it'
+                ' outdated, add a "supersedes" key to that entry: the array of'
+                ' replaced memory uids, e.g. "supersedes": ["<uid>"]. Omit'
+                ' "supersedes" when nothing is replaced.'
+            )
     return (
         "<|im_start|>system\n"
         + SYSTEM_PROMPT

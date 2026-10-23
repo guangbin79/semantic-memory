@@ -13,6 +13,8 @@ import pytest
 
 from semantic_memory import gpu_breaker
 from semantic_memory.distiller import (
+    MAX_NEIGHBOR_CHARS,
+    MAX_NEIGHBORS,
     SYSTEM_PROMPT,
     DistillParseError,
     Distiller,
@@ -295,3 +297,38 @@ def test_supersedes_whitelist_unconditional(monkeypatch, gguf):
     out2 = d2.distill(["原文"], "p", neighbors=[("nb1", "旧内容")])  # 白名单内合法 uid 保留
     assert out2[0]["supersedes"] == ["nb1"]
     assert "supersedes" not in out2[1]
+
+
+# ---------- MEMORIES 段预算（gt-e696：2026-10-23 "4356≥4096" 全局熔断事故收口） ----------
+
+
+def _memories_section(prompt: str) -> str:
+    """提取 <<<MEMORIES>>> 段正文（预算断言共用）。"""
+    return prompt.split("<<<MEMORIES>>>\n", 1)[1].split("\n<<<END>>>", 1)[0]
+
+
+def test_memories_budget_caps_count_and_chars():
+    """近邻段双预算：条数 ≤MAX_NEIGHBORS、段字符 ≤MAX_NEIGHBOR_CHARS（含前缀与换行）。"""
+    big = [(f"uid{i:02d}", "邻" * 400) for i in range(50)]
+    section = _memories_section(format_prompt(["新原文"], "p", neighbors=big))
+    assert len(section.splitlines()) <= MAX_NEIGHBORS  # 条数封顶
+    assert len(section) <= MAX_NEIGHBOR_CHARS  # 段长受硬预算约束
+    tiny = [(f"u{i}", "x" * 20) for i in range(10)]  # 小条目让条数上限真实生效
+    tiny_section = _memories_section(format_prompt(["t"], "p", neighbors=tiny))
+    assert len(tiny_section.splitlines()) == MAX_NEIGHBORS
+
+
+def test_memories_oversized_first_neighbor_omits_section():
+    """首条近邻放不下预算：整段省略（MEMORIES 与 supersedes 指令块一起省，退化无近邻形态）。"""
+    prompt = format_prompt(["新原文"], "p", neighbors=[("abc123", "旧" * 700)])
+    assert "<<<MEMORIES>>>" not in prompt
+    assert '"supersedes"' not in prompt
+    assert prompt == format_prompt(["新原文"], "p")  # 与无近邻形态逐字节一致
+
+
+def test_prompt_total_length_bound():
+    """全 prompt 字符上界：批原文顶满截断＋近邻段超供 <3600（事故预算算术回归锚）。"""
+    texts = ["原" * 1500, "文" * 1500]  # join 3007 字符 → 截 MAX_INPUT_CHARS
+    neighbors = [(f"uid{i:02d}", "邻" * 400) for i in range(50)]
+    prompt = format_prompt(texts, "github.com/a/b", neighbors=neighbors)
+    assert len(prompt) < 3600
