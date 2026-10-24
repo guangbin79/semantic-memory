@@ -36,6 +36,7 @@ from ._compat import HAS_NUMPY, INSTALL_HINT
 from . import gpu_breaker
 from .cloud import Consolidator
 from .config import Config
+from .consistency import run_sweep
 from .db import MemoryStore
 from .distiller import Distiller
 from .embedder import Embedder
@@ -946,7 +947,7 @@ def _cmd_consolidate() -> None:
 _USAGE = """usage: semantic-memory [-h] [command]
 
 语义记忆服务（单进程）。默认命令 serve：启动 HTTP 服务（REST 面）。
-管理子命令：setup / purge / backfill / eval / golden / consolidate / distill（详见各 --help）。
+管理子命令：setup / purge / backfill / eval / golden / consolidate / distill / sweep（详见各 --help）。
 """
 
 
@@ -998,6 +999,9 @@ def main() -> None:
         return
     if cmd == "distill":  # 触发器三路：手动 flush（同步跑完打印报告）
         print(json.dumps(flush_distill_queue(store, distiller, embedder=embedder), ensure_ascii=False))
+        return
+    if cmd == "sweep":  # 一致性巡检：悬空路径引用候选报告，只报告不删除（悬空≠无效）
+        print(json.dumps(run_sweep(store), ensure_ascii=False))
         return
 
     # ---- 分层严格启动门（任务 9/R2）：拒启必须先于端口绑定 ----
