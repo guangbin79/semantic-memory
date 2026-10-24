@@ -60,9 +60,13 @@ def check_ref(ref: str, base: str | None) -> tuple[str, str]:
     status：ok（存在）| missing（悬空候选）| unverifiable（无 base 可依，
     不计悬空）。相对路径仅在 project 字段本身是绝对路径形式的现存目录
     （非 git 回退形态）时以其为 base——归一化 git 键无法定位检出目录。
+    file:// 带非本机 authority（RFC 8089）不是本地路径，unverifiable。
     """
     if ref.startswith("file://"):
-        path = urllib.parse.unquote(urllib.parse.urlparse(ref).path)
+        parsed = urllib.parse.urlparse(ref)
+        if parsed.netloc and parsed.netloc.lower() != "localhost":
+            return "unverifiable", ref
+        path = urllib.parse.unquote(parsed.path)
     elif ref.startswith("~/"):
         path = os.path.expanduser(ref)
     elif ref.startswith("/"):
@@ -78,37 +82,42 @@ def check_ref(ref: str, base: str | None) -> tuple[str, str]:
 def run_sweep(store: MemoryStore, page_size: int = 200) -> dict:
     """全量遍历活条目（deleted=0），产出悬空引用候选报告（零写入）。
 
-    分页走既有 list_page（时间倒序），不新增存储面。报告悬空明细带
-    uid/project/kind/ref，供人工核对后自行 forget——本函数不删。
+    WAL 读快照事务包住遍历：并发软删/新插不致 OFFSET 窗口跳页/重扫，
+    报告语义＝sweep 起始时刻的活条目快照。报告悬空明细带 uid/project/
+    kind/ref，供人工核对后自行 forget——本函数不删。
     """
     dangling: list[dict] = []
     by_project: dict[str, int] = {}
     scanned = with_refs = ok = unverifiable = 0
     offset = 0
-    while True:
-        total, rows = store.list_page(limit=page_size, offset=offset)
-        if not rows:
-            break
-        for row in rows:
-            scanned += 1
-            refs = extract_path_refs(row["content"])
-            if not refs:
-                continue
-            with_refs += 1
-            for ref in refs:
-                status, _ = check_ref(ref, row["project"])
-                if status == "ok":
-                    ok += 1
-                elif status == "missing":
-                    dangling.append({"uid": row["uid"], "project": row["project"],
-                                     "kind": row["kind"], "ref": ref})
-                    key = row["project"] or "(none)"
-                    by_project[key] = by_project.get(key, 0) + 1
-                else:
-                    unverifiable += 1
-        offset += len(rows)
-        if offset >= total:
-            break
+    store.conn.execute("BEGIN")  # 延迟事务：首读取快照，遍历期一致
+    try:
+        while True:
+            total, rows = store.list_page(limit=page_size, offset=offset)
+            if not rows:
+                break
+            for row in rows:
+                scanned += 1
+                refs = extract_path_refs(row["content"])
+                if not refs:
+                    continue
+                with_refs += 1
+                for ref in refs:
+                    status, _ = check_ref(ref, row["project"])
+                    if status == "ok":
+                        ok += 1
+                    elif status == "missing":
+                        dangling.append({"uid": row["uid"], "project": row["project"],
+                                         "kind": row["kind"], "ref": ref})
+                        key = row["project"] or "(none)"
+                        by_project[key] = by_project.get(key, 0) + 1
+                    else:
+                        unverifiable += 1
+            offset += len(rows)
+            if offset >= total:
+                break
+    finally:
+        store.conn.execute("COMMIT")
     return {"scanned": scanned, "entries_with_refs": with_refs, "refs_ok": ok,
             "dangling": dangling, "unverifiable_refs": unverifiable,
             "dangling_by_project": by_project}

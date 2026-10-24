@@ -44,6 +44,15 @@ def test_check_ref_absolute(tmp_path):
     assert check_ref(str(tmp_path / "nope"), None)[0] == "missing"
 
 
+def test_check_ref_file_uri_authority(tmp_path):
+    existing = tmp_path / "f.txt"
+    existing.write_text("x")
+    assert check_ref(f"file://{existing}", None)[0] == "ok"          # 空 authority＝本地
+    assert check_ref(f"file://localhost{existing}", None)[0] == "ok"  # 显式 localhost
+    assert check_ref("file://nas/share/doc.md", None)[0] == "unverifiable"  # 远程 host 不是本地路径
+    assert check_ref("file://example.com", None)[0] == "unverifiable"  # host-only：path="" 不再假 missing
+
+
 def test_check_ref_relative_needs_abs_dir_base(tmp_path):
     (tmp_path / "docs").mkdir()
     (tmp_path / "docs" / "a.md").write_text("x")
