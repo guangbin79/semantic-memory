@@ -17,9 +17,10 @@ LOG=$(mktemp /tmp/sm-itest-XXXXXX.log)
 # config.toml 的蒸馏模型，typed 蒸馏改写内容＋project 归属漂移，断言必挂
 export MEMORY_DISTILL_MODEL=
 export MEMORY_PLUGIN_TOOL_CAPTURE=bash   # execute.after 白名单默认关闭，test §5 依赖 bash 捕获
+export MEMORY_DISTILL_BATCH=0            # 关批量 flush（pending≥20 自动排空会掏空 distill_queue，§4d 计数 flaky）；队列只经 /idle flush
 MEMORY_PORT=$PORT MEMORY_DB_PATH="$DB" "$ROOT/venv/bin/semantic-memory" serve >"$LOG" 2>&1 &
 PID=$!
-trap 'kill $PID 2>/dev/null || true; rm -f "$DB" "$DB"-wal "$DB"-shm "$LOG"' EXIT
+trap 'kill $PID 2>/dev/null || true; rm -f "$DB" "$DB"-wal "$DB"-shm "$DB.server.json" "$LOG"' EXIT
 up=0
 for _ in $(seq 1 60); do
   curl -sm1 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && { up=1; break; }
