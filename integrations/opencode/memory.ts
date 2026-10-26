@@ -299,7 +299,7 @@ export const REMEMBER_RE = /(?:记住|请记住|remember)[:：]\s*(.{10,500})/i;
  *  子串匹配（无 ^ 锚）：横幅前常缀注入块/引号，锚定必失配（2026-10-21 R2 实证 2/7 漏检）。
  *  已知边界：headless 代理任务提示词（issue-agent 派发/终闸评审）无法穷举——结构性修法
  *  （交互/非交互会话区分）待上游能力，见知识页 Open Questions。 */
-export const HARNESS_NOISE_RE = /(work finished with unreviewed|the server restarted while|session failed|continue from where you left off|review scope:|you are a subagent|你是零共享终闸评审者|检测到 OpenCode 配置\/插件\/MCP 变更)/i;
+export const HARNESS_NOISE_RE = /(work finished with unreviewed|the server restarted while|session failed|continue from where you left off|review scope:|you are a subagent|你是零共享终闸评审者|^⚠?\s*检测到 OpenCode 配置\/插件\/MCP 变更)/i;
 
 /** sessionID → /ingest session_id（入队与直存共用服务端列）。 */
 export function sidOf(v: unknown): string | undefined {

@@ -5,6 +5,8 @@ set -euo pipefail
 cd "$(dirname "$0")"
 ROOT=$(git rev-parse --show-toplevel)
 PORT=${MEMORY_TEST_PORT:-8766}
+exec 9>"/tmp/sm-itest-$PORT.lock"          # flock 全生命周期互斥：封 curl 探活→bind 的 TOCTOU 窗（B1）
+flock -n 9 || { echo "另一份测试实例持有锁（端口 $PORT）" >&2; exit 1; }
 if curl -sm1 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
   echo "端口 $PORT 已被占用（遗留测试服务？），拒绝叠跑" >&2; exit 1
 fi
