@@ -43,6 +43,7 @@ from .embedder import Embedder
 from .graph import cross_project_extras, graph_edges
 from .hybrid import hybrid_recall
 from .lifecycle import (
+    NEAR_LO,
     backfill_vectors,
     enqueue_raw,
     flush_distill_queue,
@@ -209,7 +210,38 @@ def _recall_hits(query: str, limit: int, project: str | None, global_limit: int)
             store, merged, project=project,
             cross_sim=cfg.cross_sim, limit=cfg.cross_limit)
             if e["uid"] not in seen]
+    _mark_decision_conflicts(merged)
     return merged
+
+
+def _mark_decision_conflicts(hits: list[dict]) -> None:
+    """C 冲突聚簇标注：同 project 的 decision 条目两两余弦 ≥ NEAR_LO → conflict=True。
+
+    机器只做候选发现（向量与 kind 都在库内，零新模型）；裁决交给当场有上下文
+    的 agent（注入块尾 supersede 指引，插件面渲染）。无 numpy / 无向量 / 不足
+    两条 → 静默跳过。阈值复用 lifecycle.NEAR_LO（近邻介入带下沿，语义同源）。
+    """
+    if not HAS_NUMPY:
+        return
+    groups: dict[str, list[dict]] = {}
+    for h in hits:
+        if h.get("kind") == "decision" and h.get("project"):
+            groups.setdefault(h["project"], []).append(h)
+    for proj, group in groups.items():
+        if len(group) < 2:
+            continue
+        uids, mat = store.all_vectors(project=proj)
+        row = {u: i for i, u in enumerate(uids)}
+        pair = [(h, row[h["uid"]]) for h in group if h["uid"] in row]
+        if len(pair) < 2:
+            continue
+        m = mat[[i for _, i in pair]]
+        sims = m @ m.T
+        for a in range(len(pair)):
+            for b in range(a + 1, len(pair)):
+                if float(sims[a, b]) >= NEAR_LO:
+                    pair[a][0]["conflict"] = True
+                    pair[b][0]["conflict"] = True
 
 
 # ---------------- REST 端点（鉴权与传输门由 _Handler 负责） ----------------
@@ -391,6 +423,9 @@ def rest_recall(body: dict) -> dict | tuple[int, dict]:
 # 入队路由（r3 评审）：chat/compaction 是蒸馏队列的投料源——落盘缓冲、热路径零 LLM；
 # 显式 remember / tool capture 保持直存（即时可见，也避免队列无人投料的死管道）。
 QUEUED_SOURCES = frozenset({"compaction", "chat"})
+# W 写侧门的自动捕获源＝队列源＋工具产物捕获（插件 execute.after 白名单制，也是
+# 钩子自动发出而非用户显式——终闸 B1：漏它则 /tmp 噪声经全局桶跨项目注入复活）。
+AUTO_SOURCES = QUEUED_SOURCES | {"tool"}
 
 
 def _spawn_flush() -> None:
@@ -419,6 +454,14 @@ def rest_ingest(body: dict) -> dict | tuple[int, dict]:
     if raw_project is not None and not isinstance(raw_project, str):
         return 400, {"error": "project must be a string"}
     project = resolve_project(raw_project)
+    # W 写侧门（2026-10-26 /tmp fixture 噪声实证；终闸 R2 补 tool 源）：绝对路径
+    # 归一失败 ⇒ 非 git/无 origin 工作区——自动捕获（chat/compaction/tool，皆插件
+    # 钩子自动发出）拒收；显式调用（remember 等）不拒收，降级全局桶并在响应回显。
+    # 归一化键（如 github.com/a/b）与相对串不以 / 开头，天然不受门影响。
+    if raw_project and project == raw_project and raw_project.startswith("/"):
+        if source in AUTO_SOURCES:
+            return {"queued": False, "dropped": "unresolvable_project"}
+        project = None
     content = body.get("content")
     if not isinstance(content, str):
         return 400, {"error": "content must be a string"}
@@ -437,7 +480,8 @@ def rest_ingest(body: dict) -> dict | tuple[int, dict]:
         tags=body.get("tags"),
         dedup_sim=cfg.dedup_sim,
     )
-    return {"uid": uid, "deduped": deduped}
+    # 终闸 B2：W 门可能把显式条目降级全局——回显实际落库 project，调用方可观测
+    return {"uid": uid, "deduped": deduped, "project": project}
 
 
 def inject_report(body: dict) -> tuple[int, dict]:

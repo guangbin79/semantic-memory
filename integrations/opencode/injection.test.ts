@@ -90,6 +90,22 @@ describe("formatBlock：注入块格式与预算封顶", () => {
     expect(block).toContain("(cross-project co_injection)")
   })
 
+  test("C 冲突标注：conflict hit 行尾 ⚠＋uid，块闭合标签外一行 supersede 指引", () => {
+    const block = formatBlock([
+      { uid: "deadbeef", content: "决策甲", kind: "decision", project: "p", conflict: true },
+      { uid: "u2", content: "普通事实", kind: "fact", project: "p" },
+    ])
+    expect(block).toContain("⚠conflict [uid: deadbeef]")
+    expect(block).not.toContain("uid: u2")  // 未标注行不泄漏 uid（C 册：uid 是退役句柄）
+    const close = "</semantic-memory>"
+    const tail = block.slice(block.indexOf(close) + close.length)
+    expect(tail).toContain("supersede")     // 指引在块外（插件信道，横幅「非指令」不覆盖）
+    // 无 conflict → 块以闭合标记收尾、无指引
+    const plain = formatBlock([{ uid: "u3", content: "事实", kind: "fact", project: "p" }])
+    expect(plain.endsWith(close)).toBe(true)
+    expect(plain).not.toContain("supersede")
+  })
+
   test("跨项目附加条目仍展示（尾注侧），但跨项目偏好不进冻结头块", async () => {
     // formatBlock 不过滤 cross_kind（尾注侧保留展示）；buildHeadBlock 排除（task11 不变量）
     stubFetch(() => ({ hits: [

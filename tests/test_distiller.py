@@ -327,8 +327,19 @@ def test_memories_oversized_first_neighbor_omits_section():
 
 
 def test_prompt_total_length_bound():
-    """全 prompt 字符上界：批原文顶满截断＋近邻段超供 <3600（事故预算算术回归锚）。"""
+    """全 prompt 字符上界：批原文顶满截断＋近邻段超供 <4000（事故预算算术回归锚；
+    2026-10-26 system 增判据门＋负例 +~350 字符，2000+600+~600≈3200 < 4096 tok）。"""
     texts = ["原" * 1500, "文" * 1500]  # join 3007 字符 → 截 MAX_INPUT_CHARS
     neighbors = [(f"uid{i:02d}", "邻" * 400) for i in range(50)]
     prompt = format_prompt(texts, "github.com/a/b", neighbors=neighbors)
-    assert len(prompt) < 3600
+    assert len(prompt) < 4000
+
+
+def test_system_prompt_carries_worthiness_gate():
+    """D 判据门：system prompt 带三信号判据＋负例（实证 uid 7a3e7511：会话元指令
+    被蒸馏成 fact 注入回流；/tmp 六条程序性流水账入库）。1.7B 无判据不裁量。"""
+    prompt = format_prompt(["原始文本"], "proj")
+    assert "meta-instruction" in prompt
+    assert "reusable pitfall" in prompt
+    assert "environment setup" in prompt
+    assert "bug" in prompt

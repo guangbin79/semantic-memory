@@ -445,3 +445,168 @@ def test_api_graph_endpoint(client):
     edges = client.get("/api/graph", params={"uid": new}).json()["edges"]
     assert any(e["kind"] == "supersedes" and e["to_uid"] == old
                and e["superseded"] is True for e in edges)
+
+
+# ---------------- W 写侧门：非 git 目录（不可归一到 origin）的捕获治理 ----------------
+
+def test_ingest_non_git_dir_drops_auto_capture(client, monkeypatch):
+    """绝对路径无法归一到 git origin ⇒ 非 git/无 origin 工作区：chat/compaction
+    自动捕获拒收（/tmp fixture 噪声入真库并跨项目注入的根修，2026-10-26 实证）。"""
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: SimpleNamespace(
+        returncode=1, stdout=""))
+    proj = "/tmp/tmpWgate1/proj-remote"
+    r = client.post("/ingest", json={
+        "content": "Setup environment for task gt-wgate",
+        "source": "chat", "project": proj})
+    assert r.status_code == 200
+    assert r.json() == {"queued": False, "dropped": "unresolvable_project"}
+    n = server.store.conn.execute(
+        "SELECT COUNT(*) FROM memories WHERE project=?", (proj,)).fetchone()[0]
+    assert n == 0
+
+
+def test_ingest_non_git_dir_explicit_remember_lands_global(client, monkeypatch):
+    """W 门豁免：显式 remember 不拒收，project 置空落全局桶——显式调用即豁免。"""
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: SimpleNamespace(
+        returncode=1, stdout=""))
+    r = client.post("/ingest", json={
+        "content": "显式记住 W-gate 全局偏好", "kind": "preference",
+        "source": "remember", "project": "/tmp/tmpWgate2/proj-remote"})
+    assert r.status_code == 200 and r.json()["uid"]
+    assert r.json()["project"] is None  # 终闸 B2：降级在响应回显，调用方可观测
+    row = server.store.get_many([r.json()["uid"]])[0]
+    assert row["project"] is None
+
+
+def test_ingest_non_git_dir_drops_tool_capture(client, monkeypatch):
+    """终闸 B1：tool 源也是插件钩子自动捕获（非显式）——同拒收，堵全局桶旁路。"""
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: SimpleNamespace(
+        returncode=1, stdout=""))
+    proj = "/tmp/tmpWgate3/proj-remote"
+    r = client.post("/ingest", json={
+        "content": "tool bash produced: ls output", "kind": "artifact",
+        "source": "tool", "project": proj})
+    assert r.json() == {"queued": False, "dropped": "unresolvable_project"}
+    n = server.store.conn.execute(
+        "SELECT COUNT(*) FROM memories WHERE project=?", (proj,)).fetchone()[0]
+    assert n == 0
+
+
+def test_ingest_non_git_dir_drops_compaction_capture(client, monkeypatch):
+    """W 门源集完备：compaction 与 chat 同为队列源，同样拒收。"""
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: SimpleNamespace(
+        returncode=1, stdout=""))
+    r = client.post("/ingest", json={
+        "content": "user: 被压缩托管的 transcript 片段",
+        "source": "compaction", "project": "/tmp/tmpWgate4/proj-remote"})
+    assert r.json() == {"queued": False, "dropped": "unresolvable_project"}
+
+
+def test_ingest_auto_capture_nonpath_project_unchanged(client):
+    """W 门只拦绝对路径：非路径串 project（工具调用方自选键）不受影响。"""
+    r = client.post("/ingest", json={
+        "content": "自动捕获但 project 是自选键 Wkeep1",
+        "source": "chat", "project": "chosen-key-proj"})
+    assert r.json().get("queued") is True  # 正常入蒸馏队列，未拒收
+
+
+def test_ingest_explicit_git_repo_keeps_normalized_key(client, monkeypatch):
+    """W 门豁免不误伤：显式 remember 来自可归一 git 目录 → project 保留归一键。"""
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: SimpleNamespace(
+        returncode=0, stdout="git@github.com:acme/wgate-repo.git\n"))
+    r = client.post("/ingest", json={
+        "content": "显式记住 git 工作区偏好 Wkeep2", "kind": "preference",
+        "source": "remember", "project": "/home/me/wgate-repo"})
+    assert r.status_code == 200
+    assert r.json()["project"] == "github.com/acme/wgate-repo"
+    row = server.store.get_many([r.json()["uid"]])[0]
+    assert row["project"] == "github.com/acme/wgate-repo"
+
+
+# ---------------- C 冲突聚簇：阈值与分域边界 ----------------
+
+def test_recall_conflict_threshold_boundary(client):
+    """C 边界：余弦 ≥ NEAR_LO（0.60）标、< 不标——两 project 各一对双侧取样。"""
+    import math
+    for proj, dot in (("bound-a", 0.61), ("bound-b", 0.59)):
+        v1 = [1.0, 0.0]
+        v2 = [dot, math.sqrt(1.0 - dot * dot)]
+        server.store.store(f"边界对决策一 {proj} BndA", kind="decision",
+                           project=proj, embedding=v1)
+        server.store.store(f"边界对决策二 {proj} BndB", kind="decision",
+                           project=proj, embedding=v2)
+    r = client.post("/recall", json={
+        "query": "边界对决策", "limit": 10, "project": "bound-a",
+        "global_limit": 0})
+    hits = r.json()["hits"]
+    flagged = {h["project"]: h.get("conflict") for h in hits}
+    assert flagged.get("bound-a") is True    # 0.61 ≥ 0.60 → 标
+    assert flagged.get("bound-b") is None    # 0.59 < 0.60 → 不标（字段不出现）
+
+
+def test_recall_conflict_same_topic_cross_project_unflagged(client):
+    """C 分域：近义 decision 分布在不同 project → 不互标（分域裁决，跨域是参考）。"""
+    server.store.store("路线规划默认用 A 算法 Xcp1", kind="decision",
+                       project="cp-a", embedding=[0.9, 0.3])
+    server.store.store("路线规划默认用 B 算法 Xcp2", kind="decision",
+                       project="cp-b", embedding=[0.9, 0.31])
+    r = client.post("/recall", json={
+        "query": "路线规划默认", "limit": 10, "project": "cp-a"})
+    hits = [h for h in r.json()["hits"] if h.get("project") in ("cp-a", "cp-b")]
+    assert len(hits) == 2
+    assert all(not h.get("conflict") for h in hits)
+
+
+def test_recall_conflict_global_decisions_not_scanned(client):
+    """C 分域：project 为空（全局桶）的 decision 对不进聚簇扫描。"""
+    server.store.store("全局决策一：构建输出目录约定 Gd1", kind="decision",
+                       embedding=[1.0, 0.05])
+    server.store.store("全局决策二：构建输出目录改约定 Gd2", kind="decision",
+                       embedding=[0.95, 0.1])
+    r = client.post("/recall", json={"query": "构建输出目录", "limit": 5})
+    hits = r.json()["hits"]
+    assert len(hits) == 2
+    assert all(not h.get("conflict") for h in hits)
+
+
+# ---------------- C 冲突聚簇标注：同 project 高相似 decision 对 ----------------
+
+def test_recall_flags_conflicting_decisions(client):
+    """同 project 两条 decision 向量相似 ≥ NEAR_LO → hits 带 conflict 标记
+    （机器只做候选发现，裁决交给当场有上下文的 agent）。"""
+    server.store.store("决策甲：构建入口统一用 make CconfA", kind="decision",
+                       project="conf-proj", embedding=[1.0, 0.1])
+    server.store.store("决策乙：构建入口改用 just CconfB", kind="decision",
+                       project="conf-proj", embedding=[0.9, 0.2])
+    r = client.post("/recall", json={
+        "query": "构建入口", "limit": 5, "project": "conf-proj"})
+    # 只看本项目命中（跨项目附加条目是既有行为）
+    hits = [h for h in r.json()["hits"] if h.get("project") == "conf-proj"]
+    assert len(hits) == 2
+    assert all(h.get("conflict") is True for h in hits)
+
+
+def test_recall_orthogonal_decisions_unflagged(client):
+    """C 反例：正交向量的 decision 对不标 conflict——误报该花一眼，不该常驻。"""
+    server.store.store("正交决策一：文档站用 vitepress Xorth1", kind="decision",
+                       project="orth-proj", embedding=[1.0, 0.0])
+    server.store.store("正交决策二：CI 缓存键带架构名 Xorth2", kind="decision",
+                       project="orth-proj", embedding=[0.0, 1.0])
+    r = client.post("/recall", json={
+        "query": "Xorth", "limit": 5, "project": "orth-proj"})
+    # 跨项目附加条目是既有行为（co_injection 图谱），断言只看本项目命中
+    hits = [h for h in r.json()["hits"] if h.get("project") == "orth-proj"]
+    assert len(hits) == 2
+    assert all(not h.get("conflict") for h in hits)
+
+
+def test_recall_conflict_skips_missing_vectors(client):
+    """C3：参与聚簇的 decision 缺向量 → 静默跳过该条（不 crash、不误标）。"""
+    server.store.store("有向量决策 Vconf1", kind="decision", project="novec-proj",
+                       embedding=[1.0, 0.0])
+    server.store.store("无向量决策 Vconf2", kind="decision", project="novec-proj")
+    r = client.post("/recall", json={
+        "query": "Vconf", "limit": 5, "project": "novec-proj"})
+    hits = [h for h in r.json()["hits"] if h.get("project") == "novec-proj"]
+    assert len(hits) == 2
+    assert all(not h.get("conflict") for h in hits)
