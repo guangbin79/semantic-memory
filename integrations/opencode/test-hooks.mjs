@@ -20,9 +20,9 @@
  *      线变量、input.text→body.content）；recall→POST /recall（query/limit 透传）；
  *      fetch reject→返回不可达错误串（含 setup 提示）绝不 throw（独立 10s 超时面）。
  *
- * 运行：MEMORY_PLUGIN_URL=http://127.0.0.1:8766 MEMORY_PLUGIN_TOOL_CAPTURE=bash \
- *       MEMORY_DB_PATH=/tmp/xxx.db node test-hooks.mjs
- * （服务需已启动：MEMORY_PORT=8766 MEMORY_DB_PATH=<tmp> .venv/bin/semantic-memory；
+ * 运行：npm test（自持：build＋8766 tmp DB 服务拉起→test-hooks→teardown）；
+ *       或手动：MEMORY_PLUGIN_URL=http://127.0.0.1:8766 MEMORY_DB_PATH=/tmp/xxx.db node test-hooks.mjs
+ * （手动模式服务需已启动：MEMORY_PORT=8766 MEMORY_DB_PATH=<tmp> venv/bin/semantic-memory；
  *   MEMORY_DB_PATH 同时供队列断言直读 distill_queue）
  */
 import assert from "node:assert/strict";
