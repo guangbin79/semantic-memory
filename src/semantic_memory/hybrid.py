@@ -46,8 +46,8 @@ def hybrid_recall(
     - max_cosine（融合前）：冗余上限——纯向量命中 cos 超过上限出局（过近 =
       冗余/近重复）；BM25 命中不受影响。1.0 = 关闭，默认 0.92。
     - min_cosine：RRF 只编码名次不编码相关强度——"无相关里的最近邻"也会
-      上榜。纯向量命中（无 BM25 token 证据）且余弦低于门限时丢弃。
-      实测：相关 ~0.68，无关 ~0.28-0.31，门限默认 0.45。
+      上榜。融合后所有命中统一过余弦地板，BM25 词面证据只影响排序不再
+      豁免。实测：相关 ~0.68，无关 ~0.28-0.31，门限默认 0.45。
     - inject_boost：遥测反哺——被真实注入过的记忆更可能再次相关，
       score × (1 + α·ln(1+注入次数))。对数抑制富者愈富，α 默认 0.15。
     - rerank：RRF 序 top rerank_candidates 交 Reranker 判别相关分；返回
@@ -63,7 +63,6 @@ def hybrid_recall(
     # 通道 1：BM25
     bm25_hits = store.fts_search(query, candidate_n, scope=scope, project=project)
     bm25_ranked = [uid for uid, _ in bm25_hits]
-    bm25_set = set(bm25_ranked)
 
     # 通道 2：向量余弦（暴力，~50k 条内亚毫秒；查询侧自动带 Instruct 前缀）
     vec_ranked: list[str] = []
@@ -87,10 +86,10 @@ def hybrid_recall(
         fuse_limit = max(fuse_limit, rerank_candidates)
     fused = rrf_fuse([bm25_ranked, vec_ranked], k=rrf_k, limit=fuse_limit)
 
-    # 门限：纯向量弱相关出局（BM25 命中本身已是 token 级证据，放行）
+    # 门限：余弦地板作用于全部命中（词面过、语义不过的条目出局）
+    # shortcut: 无向量条目（嵌入缺失）在地板开启时不可经 BM25 召回，backfill 修复
     if min_cosine > 0 and cos_map:
-        fused = [(u, s) for u, s in fused
-                 if u in bm25_set or cos_map.get(u, 0.0) >= min_cosine]
+        fused = [(u, s) for u, s in fused if cos_map.get(u, 0.0) >= min_cosine]
 
     # 遥测反哺：注入次数弱先验（counts 顺带透出为 hit 的 injections 字段）
     inj_counts: dict[str, int] = {}

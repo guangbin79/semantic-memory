@@ -18,3 +18,6 @@
 ## [2026-10-24] ingest | verify-env
 - 新模块页 verify-env：pytest `pythonpath=["src"]` 只在 pytest 生效；venv 裸 `-m` 走 site-packages 安装拷贝（非 editable），CLI 验证须 `PYTHONPATH=src`（gt-61cf sweep 试跑实证：裸跑落 serve 分支＋端口占用误报）
 - consistency sweep 语义要点（gt-61cf）：只报告不删除；相对指针仅 project=现存绝对路径目录才校验，否则 unverifiable 不计悬空；遍历为 WAL 读快照（显式 BEGIN..finally COMMIT，防 OFFSET 窗口并发跳页/重扫）；file:// 非 localhost authority→unverifiable。已知缺口（记录未修）：_URLSPACE 含 v1/v2＋尾斜杠丢弃会漏检 `v2/config.yaml` 类指针（评审 A1，收窄 stoplist 属产品决策）
+
+## [2026-10-28] ingest | hybrid-recall
+- min_cosine 地板扩展至全部命中（gt-bdffea）：BM25 词面证据只影响排序不再豁免门限；无向量条目（嵌入缺失）在地板开启时不可经 BM25 召回——backfill 修复未做，记录待决策

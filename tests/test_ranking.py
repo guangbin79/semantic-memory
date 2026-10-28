@@ -55,8 +55,8 @@ class _StubEmbedder:
         return np.eye(self.dim, dtype=np.float32)[0]
 
 
-def test_min_cosine_gates_vector_only_hits(store):
-    """纯向量命中（无 BM25 证据）低于门限出局；BM25 命中不受门限影响。"""
+def test_min_cosine_gates_all_hits(store):
+    """相关性地板作用于全部命中：BM25 词面证据不再绕过门限，只影响排序。"""
     dim = 8
     emb = _StubEmbedder(dim)
     near = np.eye(dim, dtype=np.float32)[0]                       # cos = 1.0
@@ -73,7 +73,7 @@ def test_min_cosine_gates_vector_only_hits(store):
     gated_uids = {h["uid"] for h in gated}
     assert uid_x in gated_uids          # cos 1.0 过门限
     assert uid_y not in gated_uids      # cos 0.3 < 0.45，纯向量出局
-    assert uid_z in gated_uids          # BM25 命中是 token 级证据，放行
+    assert uid_z not in gated_uids      # 词面命中但 cos 0.3 < 0.45：语义不过，出局
 
     open_ = hybrid_recall(store, emb, query, limit=5, min_cosine=0.0, max_cosine=1.0)
     open_uids = {h["uid"] for h in open_}
