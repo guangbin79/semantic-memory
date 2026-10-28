@@ -87,7 +87,8 @@ def hybrid_recall(
     fused = rrf_fuse([bm25_ranked, vec_ranked], k=rrf_k, limit=fuse_limit)
 
     # 门限：余弦地板作用于全部命中（词面过、语义不过的条目出局）
-    # shortcut: 无向量条目（嵌入缺失）在地板开启时不可经 BM25 召回，backfill 修复
+    # shortcut: 地板仅在 cos_map 非空（查询向量可用）时生效；纯 BM25 回退（嵌入
+    # 缺失/失败）不受门限；混合场景下无向量条目 cos 缺省 0.0 必出局，backfill 修复
     if min_cosine > 0 and cos_map:
         fused = [(u, s) for u, s in fused if cos_map.get(u, 0.0) >= min_cosine]
 
