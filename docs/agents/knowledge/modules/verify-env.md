@@ -14,3 +14,6 @@
 
 ## 实证
 - 2026-10-24 gt-61cf：sweep 子命令落地后裸 `-m` 试跑落入 serve 分支；`PYTHONPATH=src` 即正。
+- pytest 内 subprocess 变体：`pythonpath=["src"]` 只及 pytest 进程自身，测试里
+  `subprocess.run([sys.executable, "-m", ...])` 仍走 venv 拷贝——env 须显式带
+  `PYTHONPATH=<仓根>/src`（2026-10-28 gt-d4b32f supersede CLI 测试实证）。
