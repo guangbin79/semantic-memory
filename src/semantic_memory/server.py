@@ -986,12 +986,56 @@ def _cmd_consolidate() -> None:
     print(json.dumps(consolidator.run(store, embedder), ensure_ascii=False))
 
 
+def _cmd_supersede(argv: list[str]) -> int:
+    """supersede 子命令：人工温层退役入口（写 superseded_by/at，召回面即刻滤除）。
+
+    UPDATE 与 cloud.Consolidator 同款：只接未退役（superseded_by IS NULL）且未删除的条目。
+    """
+    ap = argparse.ArgumentParser(
+        prog="supersede",
+        description="人工温层退役：标记旧记忆被同 project 的新记忆接替",
+    )
+    ap.add_argument("old", help="待退役 uid")
+    ap.add_argument("--by", dest="new", required=True, help="接替 uid")
+    ns = ap.parse_args(argv)
+    old, new = ns.old, ns.new
+    if old == new:
+        print("refused: old == new", file=sys.stderr)
+        return 2
+    rows = store.conn.execute(
+        "SELECT uid, project FROM memories WHERE uid IN (?, ?) AND deleted = 0",
+        (old, new)).fetchall()
+    by_uid = {r["uid"]: r["project"] for r in rows}
+    missing = [u for u in (old, new) if u not in by_uid]
+    for u in missing:
+        print(json.dumps({"error": "not found", "uid": u}, ensure_ascii=False),
+              file=sys.stderr)
+    if missing:
+        return 1
+    if by_uid[old] != by_uid[new]:
+        print(json.dumps({"error": "cross-project supersede refused",
+                          "old": old, "new": new,
+                          "old_project": by_uid[old], "new_project": by_uid[new]},
+                         ensure_ascii=False), file=sys.stderr)
+        return 1
+    now = time.time()
+    with store.conn:
+        cur = store.conn.execute(
+            "UPDATE memories SET superseded_by=?, superseded_at=?"
+            " WHERE uid=? AND deleted=0 AND superseded_by IS NULL",
+            (new, now, old),
+        )
+    print(json.dumps({"superseded": cur.rowcount, "old": old, "new": new},
+                     ensure_ascii=False))
+    return 0
+
+
 # ---------------- 入口 ----------------
 
 _USAGE = """usage: semantic-memory [-h] [command]
 
 语义记忆服务（单进程）。默认命令 serve：启动 HTTP 服务（REST 面）。
-管理子命令：setup / purge / backfill / eval / golden / consolidate / distill / sweep（详见各 --help）。
+管理子命令：setup / purge / backfill / eval / golden / consolidate / distill / sweep / supersede（详见各 --help）。
 """
 
 
@@ -1047,6 +1091,8 @@ def main() -> None:
     if cmd == "sweep":  # 一致性巡检：悬空路径引用候选报告，只报告不删除（悬空≠无效）
         print(json.dumps(run_sweep(store), ensure_ascii=False))
         return
+    if cmd == "supersede":  # 人工温层退役入口（cloud.Consolidator 同款 UPDATE）
+        raise SystemExit(_cmd_supersede(args[1:]))
 
     # ---- 分层严格启动门（任务 9/R2）：拒启必须先于端口绑定 ----
     gate = check_startup(cfg)

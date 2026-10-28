@@ -643,3 +643,65 @@ def test_flush_drop_all_marks_done(store):
     report = flush_distill_queue(store, _StubDistiller(available=True, outputs=[]))
     assert report == {"typed": 0, "stored_raw": 0, "left_pending": 0, "dropped": 2}
     assert store.distill_pending() == 0 and store.stats()["total"] == 0
+
+
+# ---------------- supersede 管理子命令（人工温层退役） ----------------
+
+
+def test_cli_supersede_retires_old(tmp_path):
+    """验收原文：supersede 后 rc0、stdout JSON 恰为 {"superseded":1, old, new}、旧条落写接替者。"""
+    import json
+    import os
+    import subprocess
+    import sys
+    db = tmp_path / "cli.db"
+    s = MemoryStore(db)
+    old, _ = ingest_with_dedup(s, Embedder(None), "旧决策：cron 跑巡检", "decision", "manual", None, None)
+    new, _ = ingest_with_dedup(s, Embedder(None), "新决策：systemd timer 跑巡检", "decision", "manual", None, None)
+    s.close()
+    # PYTHONPATH 指本仓 src：venv 里装的是独立副本，subprocess 必须测 worktree 代码
+    env = {**os.environ, "MEMORY_DB_PATH": str(db), "MEMORY_MODEL_PATH": "",
+           "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")}
+    proc = subprocess.run(
+        [sys.executable, "-m", "semantic_memory.server", "supersede", old, "--by", new],
+        capture_output=True, text=True, env=env, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {"superseded": 1, "old": old, "new": new}
+    s2 = MemoryStore(db)
+    # get_one 的 _ROW_COLS 不含 superseded_by（超范围），直查列
+    assert s2.conn.execute("SELECT superseded_by FROM memories WHERE uid=?",
+                           (old,)).fetchone()[0] == new
+    s2.close()
+
+
+def test_cli_supersede_gates(tmp_path):
+    """验收原文：不存在 uid → not found；跨 project → cross-project；拒绝路径不落写。"""
+    import os
+    import subprocess
+    import sys
+    db = tmp_path / "cli.db"
+    s = MemoryStore(db)
+    a, _ = ingest_with_dedup(s, Embedder(None), "项目甲决策", "decision", "manual", "proj-a", None)
+    b, _ = ingest_with_dedup(s, Embedder(None), "项目乙决策", "decision", "manual", "proj-b", None)
+    s.close()
+    env = {**os.environ, "MEMORY_DB_PATH": str(db), "MEMORY_MODEL_PATH": "",
+           "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")}
+
+    missing = subprocess.run(
+        [sys.executable, "-m", "semantic_memory.server", "supersede", "no-such-uid", "--by", a],
+        capture_output=True, text=True, env=env, timeout=120,
+    )
+    assert missing.returncode != 0 and "not found" in missing.stderr
+
+    cross = subprocess.run(
+        [sys.executable, "-m", "semantic_memory.server", "supersede", a, "--by", b],
+        capture_output=True, text=True, env=env, timeout=120,
+    )
+    assert cross.returncode != 0 and "cross-project" in cross.stderr
+    s2 = MemoryStore(db)
+    assert s2.conn.execute("SELECT superseded_by FROM memories WHERE uid=?",
+                           (a,)).fetchone()[0] is None
+    assert s2.conn.execute("SELECT superseded_by FROM memories WHERE uid=?",
+                           (b,)).fetchone()[0] is None
+    s2.close()
