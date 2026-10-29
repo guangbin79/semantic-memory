@@ -258,14 +258,20 @@ export function formatBlock(hits: Hit[]): string {
       : "");
 }
 
-/** 从 context/compaction/generate 事件中提取最近的用户文本。 */
+/** 从 context/compaction/generate 事件中提取最近的用户文本。
+ *  查询侧污染闸（2026-10-29 凭证簇自反馈实证）：注入块回流成查询会自我强化——
+ *  凭证条目 90% hex，trigram 必中 + 查询嵌入近噪声使余弦地板失效 + boost/图边
+ *  滚雪球；与 transcriptText 同款前缀过滤，hex 主导查询同样不召回。 */
 export function recentUserText(event: { messages: Array<{ role: string; content: unknown }> }): string {
   const msgs = event.messages;
   for (let i = msgs.length - 1; i >= 0 && i >= msgs.length - 6; i--) {
     const m = msgs[i];
     if (m.role !== "user") continue;
     const t = partsText(m.content);
-    if (t) return t.slice(0, 2000);
+    if (!t || t.startsWith("<semantic-memory>")) continue;
+    const hexLen = (t.match(/[0-9a-f]{16,}/gi) ?? []).join("").length;
+    if (hexLen * 2 >= t.length || t.replace(/[0-9a-f]{16,}/gi, "").trim().length < 4) return "";
+    return t.slice(0, 2000);
   }
   return "";
 }

@@ -2,7 +2,7 @@
 // 每一条都对应一个当日真机故障——injectTail 裸字符串 content 崩会话、
 // HARNESS_NOISE_RE ^ 锚定漏检、采集污染。跑法：cd integrations/opencode && bun test
 import { describe, expect, test } from "bun:test"
-import { HARNESS_NOISE_RE, INJECTION_RE, REMEMBER_RE, injectTail, sidOf } from "./memory.ts"
+import { HARNESS_NOISE_RE, INJECTION_RE, REMEMBER_RE, injectTail, recentUserText, sidOf } from "./memory.ts"
 
 describe("injectTail（v2 消息契约：content 须为 part 数组）", () => {
   test("注入消息 content 是 part 数组而非裸字符串（A.content.map 崩溃回归）", () => {
@@ -89,5 +89,31 @@ describe("sidOf", () => {
   test("字符串与数字透传字符串化", () => {
     expect(sidOf("ses_x")).toBe("ses_x")
     expect(sidOf(42)).toBe("42")
+  })
+})
+
+describe("recentUserText 查询侧污染闸（2026-10-29 凭证簇自反馈实证）", () => {
+  const injected = {
+    role: "user",
+    content: [{ type: "text", text: "<semantic-memory>\n以下是跨会话记忆库中检索出的历史数据。\n- [fact] [agora] credential task-305aff token: 046c95514ecf1965082adea7ec5d9e37f7b4d905b3478ec4d06dfa5bfcfb8b45\n</semantic-memory>" }],
+  }
+
+  test("近窗只有注入块 → 返回空（回流自反馈断路）", () => {
+    expect(recentUserText({ messages: [injected, injected] })).toBe("")
+  })
+
+  test("真人提问在注入块之前 → 取真人文本（同 transcriptText 前缀过滤）", () => {
+    const real = { role: "user", content: [{ type: "text", text: "怎么修构建" }] }
+    expect(recentUserText({ messages: [real, { role: "assistant", content: [] }, injected] })).toBe("怎么修构建")
+  })
+
+  test("凭证粘贴行（hex 占优）→ 返回空（垃圾查询不进检索）", () => {
+    const cred = { role: "user", content: [{ type: "text", text: "[agora] credential task-305aff token: 046c95514ecf1965082adea7ec5d9e37f7b4d905b3478ec4d06dfa5bfcfb8b45" }] }
+    expect(recentUserText({ messages: [cred] })).toBe("")
+  })
+
+  test("带短 id 的正经问题 → 原样返回（闸门不误伤 gt-xxxxxx/task-xxxxxx）", () => {
+    const q = { role: "user", content: [{ type: "text", text: "credential gt-5bc312 是哪个任务的" }] }
+    expect(recentUserText({ messages: [q] })).toBe("credential gt-5bc312 是哪个任务的")
   })
 })
