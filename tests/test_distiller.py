@@ -222,22 +222,23 @@ def test_config_distill_model_env(monkeypatch, tmp_path):
 
 
 def test_config_rerank_model_default(monkeypatch, tmp_path):
-    """三态语义：未设→常规 XDG 路径；显式空→关闭；空白填充→取值与判空一致。"""
+    """三态语义：未设→auto（按显存自动）；显式空→关闭；空白填充→取值与判空一致。"""
     from semantic_memory.config import Config
 
     monkeypatch.delenv("MEMORY_DATA_DIR", raising=False)  # conftest 隔离值不参与 tier 判定
 
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
     monkeypatch.delenv("MEMORY_RERANK_MODEL", raising=False)
-    assert Config.from_env().rerank_model == (
-        tmp_path / "memory-mcp" / "models" / "qwen3-reranker-0.6b-q8_0.gguf")
+    assert Config.from_env().rerank_auto is True  # 未设 → auto
+    assert Config.from_env().rerank_model is None
     monkeypatch.setenv("MEMORY_RERANK_MODEL", "")
+    assert Config.from_env().rerank_auto is False
     assert Config.from_env().rerank_model is None  # 空 = 重排禁用
     monkeypatch.setenv("MEMORY_RERANK_MODEL", f" {tmp_path / 'r.gguf'} ")
     assert Config.from_env().rerank_model == tmp_path / "r.gguf"  # 剥首尾空白
     monkeypatch.setenv("XDG_DATA_HOME", "")
     monkeypatch.delenv("MEMORY_RERANK_MODEL", raising=False)
-    assert Config.from_env().rerank_model.is_absolute()  # XDG 设但空串也回退 $HOME
+    assert Config.from_env().rerank_auto is True  # XDG 设但空串也回退 $HOME；缺省仍 auto
 
 
 # ---------- 真件冒烟（opt-in：MEMORY_DISTILL_MODEL 指向真 GGUF 才跑） ----------

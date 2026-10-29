@@ -143,7 +143,7 @@ def test_memory_db_path_only_overrides_db(monkeypatch, tmp_path):
 
     cfg = Config.from_env()
     assert cfg.db_path == tmp_path / "x" / "y.db"
-    assert cfg.rerank_model == tmp_path / "dd" / "models" / "qwen3-reranker-0.6b-q8_0.gguf"
+    assert cfg.rerank_auto is True and cfg.rerank_model is None  # 缺省 auto
     monkeypatch.delenv("MEMORY_DB_PATH", raising=False)
     assert Config.from_env().db_path == tmp_path / "dd" / "data" / "memory.db"
 

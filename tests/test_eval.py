@@ -153,9 +153,9 @@ def test_judge_without_wiring_exits_zero(eval_env, tmp_path, capsys, monkeypatch
     assert "重排模型不可用" in capsys.readouterr().out
 
 
-def test_reranker_distiller_share_one_modelslot():
-    """组合根单槽分时（F2 B-1）：reranker 与 distiller 必须共用同一 ModelSlot。"""
-    assert server.reranker._slot is server.distiller._slot
+def test_reranker_distiller_independent_resident_slots():
+    """三模型各自常驻（2026-10-29 废弃单槽分时）：reranker 与 distiller 槽相互独立。"""
+    assert server.reranker._slot is not server.distiller._slot
 
 
 def test_sample_fixture_loads_three_rows():

@@ -58,7 +58,7 @@ def test_missing_file_and_missing_keys_fall_back(monkeypatch, tmp_path):
     cfg = Config.from_env()  # 无 config.toml → 全默认
     assert cfg.port == 8765 and cfg.token is None
     assert cfg.db_path == dd / "data" / "memory.db"
-    assert cfg.rerank_model == dd / "models" / "qwen3-reranker-0.6b-q8_0.gguf"
+    assert cfg.rerank_auto is True and cfg.rerank_model is None  # 缺省 auto
     _write_toml(dd, 'device = "cpu"\n')  # 缺键回落：其余字段仍默认
     cfg = Config.from_env()
     assert cfg.device == "cpu" and cfg.port == 8765 and cfg.token is None

@@ -14,7 +14,7 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-from .paths import default_db_path, default_model_path, resolve_data_dir
+from .paths import default_db_path, resolve_data_dir
 
 CONFIG_FILENAME = "config.toml"
 _SECRET_KEYS = ("token", "cloud_api_key")  # 写文件时触发 chmod 600 的密钥字段
@@ -63,6 +63,23 @@ def write_config(data_dir: Path, values: dict) -> Path:
     return path
 
 
+# ---- rerank auto 阈值（2026-10-29 真机 spike：RTX 3060 Laptop 6GB，三模型各自常驻
+# 拓扑下 per-pid 实测 4802 MiB = embed 1956 + rerank +1026 + distill +1820，取整 4800）----
+AUTO_RESIDENCY_MIB = 4800
+AUTO_MARGIN_MIB = 512  # 吸收 nvidia-smi 记账差与其他进程迟到的显存占用
+RERANK_GGUF_NAME = "qwen3-reranker-0.6b-q8_0.gguf"  # auto 常规路径文件名（单一事实源）
+
+
+def auto_rerank_enabled(free_mib: int | None, device: str) -> bool:
+    """auto 模式判定：启动时空闲显存 ≥ 三模型常驻+余量 → 开（3 常驻）；否则关（2 常驻）。
+
+    cpu 无显存约束恒开；探测不可得（None）宁可降级不赌 OOM。
+    """
+    if device == "cpu":
+        return True
+    return free_mib is not None and free_mib >= AUTO_RESIDENCY_MIB + AUTO_MARGIN_MIB
+
+
 @dataclass(frozen=True)
 class Config:
     db_path: Path
@@ -89,6 +106,7 @@ class Config:
     dedup_sim: float           # 向量近似去重阈值（同 project 内）
     # ---- 重排（completions logprobs 法；调用面接线在 hybrid 召回）----
     rerank_model: Path | None  # Qwen3-Reranker GGUF；None → 重排关闭（RRF 序直出）
+    rerank_auto: bool          # True → 启动时按空闲显存自动决定（auto 模式）
     rerank_candidates: int     # 送入重排的候选条数（RRF 融合后截取）
     rerank_budget_ms: int      # 单次 rerank 总预算（毫秒）；超时整体 fail-open
     # ---- 蒸馏（Qwen3-1.7B 非思考；调用面：flush_distill_queue + 三路触发）----
@@ -145,11 +163,14 @@ class Config:
         model = opt("MEMORY_MODEL_PATH", "model_path")
         # 门禁 PASSED（.omo/evidence/rerank-gate.md 2026-10-16：recall@5 0.939≥基线 0.909）
         # 后默认启用：全未配置 → <data_dir>/models/ 常规路径（文件存在即生效，缺失优雅关闭）
+        # 三态：缺省/"auto" → 按显存自动；"" → 显式关；路径 → 显式开。
+        # 旧缺省（键缺省即恒开）由 auto 取代（2026-10-29）：小卡自动降级，免手工改配置。
         rerank_raw = opt("MEMORY_RERANK_MODEL", "rerank_model")
-        rerank_model = (
-            str(default_model_path("qwen3-reranker-0.6b-q8_0.gguf"))
-            if rerank_raw is None else rerank_raw.strip()
-        )
+        if rerank_raw is None:  # 键缺省 → auto；""（显式禁用）必须原样保留
+            rerank_raw = "auto"
+        rerank_raw = rerank_raw.strip()
+        rerank_auto = rerank_raw.lower() == "auto"
+        rerank_model = "" if rerank_auto else rerank_raw
         distill_model = opt("MEMORY_DISTILL_MODEL", "distill_model")
 
         db_path = Path(s("MEMORY_DB_PATH", "db_path") or default_db_path())
@@ -186,8 +207,9 @@ class Config:
                 True, lambda v: v == "1"),
             dedup_sim=float(s("MEMORY_DEDUP_SIM", "dedup_sim", "0.98")),
             rerank_model=Path(rerank_model) if rerank_model.strip() else None,
+            rerank_auto=rerank_auto,
             rerank_candidates=int(s("MEMORY_RERANK_CANDIDATES", "rerank_candidates", "20")),
-            rerank_budget_ms=int(s("MEMORY_RERANK_BUDGET_MS", "rerank_budget_ms", "500")),
+            rerank_budget_ms=int(s("MEMORY_RERANK_BUDGET_MS", "rerank_budget_ms", "1500")),  # 500→1500：2026-10-29 实测真实 20 候选热态 ~490ms，500 纯赌运气；1500 覆盖含首载冷调用
             distill_model=Path(distill_model) if distill_model else None,
             distill_batch=int(s("MEMORY_DISTILL_BATCH", "distill_batch", "20")),
             cloud_enabled=_bool(

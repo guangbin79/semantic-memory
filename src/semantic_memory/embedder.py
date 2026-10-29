@@ -80,6 +80,21 @@ def _pid_vram_on_gpu(pid: int) -> str | None:
     return None
 
 
+def _card_free_mib() -> int | None:
+    """整卡空闲显存（MiB）；nvidia-smi 缺失/查询失败 → None（调用方按降级处理）。"""
+    if shutil.which("nvidia-smi") is None:
+        return None
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=10, check=True,
+        ).stdout
+        return int(out.strip().splitlines()[0])
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError) as exc:
+        log.warning("nvidia-smi 空闲显存查询失败: %s", exc)
+        return None
+
+
 def _preload_cuda_libs() -> None:
     """尽力预装 nvidia-wheel 的 CUDA 运行库（RTLD_GLOBAL）。
 

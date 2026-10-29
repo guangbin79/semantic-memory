@@ -52,8 +52,8 @@ forever. Compaction makes the window fit; the sidecar makes compression safe.
 │  write side: distill queue → async flush → typed facts   │
 │  cloud channel (config-gated): consolidation returning   │
 │    only a metadata ops plan — no cloud content stored    │
-│  shared model slot: embedder resident; reranker and      │
-│    distiller time-share one exclusive slot (LRU=1)       │
+│  residency: reranker & distiller each resident (private  │
+│    slot, no time-share); embedder resident outside slots │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -193,9 +193,9 @@ Service:
 | `MEMORY_CROSS_LIMIT` | `2` | Cap on cross-project extras (never counted against the main quota) |
 | `MEMORY_CROSS_SIM` | `0.90` | Cosine threshold for cross-project synonym edges |
 | `MEMORY_INJECT_BOOST` | `0.15` | Telemetry feedback: score × (1 + α·ln(1+injections)); `0` = off |
-| `MEMORY_RERANK_MODEL` | `~/semantic-memory/models/qwen3-reranker-0.6b-q8_0.gguf` | Reranker GGUF (**ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF only** — official conversion, community builds may lack the rank head); default = conventional path (gate PASSED 2026-10-16: recall@5 0.939 vs 0.909 baseline) — on when the file exists, graceful off + warning when missing; set empty to disable |
+| `MEMORY_RERANK_MODEL` | `~/semantic-memory/models/qwen3-reranker-0.6b-q8_0.gguf` | Reranker GGUF (**ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF only** — official conversion, community builds may lack the rank head); default = `auto` — at startup (before any model load) free VRAM ≥ 5312 MiB (2026-10-29 spike: 3-model residency 4800 + 512 margin) → rerank on (3 models resident), else off (2 models); set a path to force on, empty to disable |
 | `MEMORY_RERANK_CANDIDATES` | `20` | Top-N RRF candidates fed to the reranker |
-| `MEMORY_RERANK_BUDGET_MS` | `500` | Total rerank budget per recall (incl. model-slot load); exceeded = fail-open to RRF order |
+| `MEMORY_RERANK_BUDGET_MS` | `1500` | Total rerank budget per recall (incl. model load); exceeded = fail-open to RRF order. 1500 since 2026-10-29: real 20-candidate warm rerank measures ~490ms, 500 was a coin flip |
 
 **Cloud channel privacy.** Configuring `MEMORY_CLOUD_BASE_URL` + `MEMORY_CLOUD_API_KEY` + `MEMORY_CLOUD_MODEL` (with `MEMORY_CLOUD_ENABLED` ≠ `0`, the default) means **memory content is sent to that endpoint** — a deterministically pre-filtered set of near-duplicate cluster members and their immediate neighborhood, never the whole store. The cloud returns only a **metadata operations plan** (`supersede`/`touch` by uid): no cloud-generated content is ever written to the store, and a plan containing anything resembling an injection pattern is dropped wholesale. The daily caps (`MEMORY_CLOUD_DAILY_MAX_CALLS` / `MEMORY_CLOUD_DAILY_MAX_TOKENS`) are in-process counters — **service restart resets them**. `MEMORY_CLOUD_ENABLED=0` is the kill switch and wins over everything.
 | `MEMORY_DISTILL_MODEL` | empty | Distiller GGUF (Qwen3-1.7B, non-thinking); empty = distill off (raw text stored on flush) |
@@ -480,15 +480,17 @@ still earns a score. Post-fusion steps:
 - **Redundancy ceiling** (`MEMORY_RECALL_MAX_COSINE=0.92`): a vector-only hit
   whose cosine exceeds the ceiling is dropped as redundant ("too near = already
   known"); BM25 hits pass untouched; `1.0` = off.
-- **Local rerank** (`MEMORY_RERANK_MODEL`, **on by default** since the gate
-  PASSED 2026-10-16 — recall@5 0.939 vs 0.909 RRF baseline, recall@1 +21pp on a
-  33-query golden set): the top `MEMORY_RERANK_CANDIDATES=20` RRF candidates
+- **Local rerank** (`MEMORY_RERANK_MODEL`, **auto by default** since 2026-10-29:
+  at startup free VRAM ≥ 5312 MiB (spike-calibrated 3-model residency + margin)
+  → 3 models resident, rerank on; below → 2 models, rerank off (RRF order).
+  Gate PASSED 2026-10-16 — recall@5 0.939 vs 0.909 RRF baseline, recall@1 +21pp
+  on a 33-query golden set): the top `MEMORY_RERANK_CANDIDATES=20` RRF candidates
   are re-scored by Qwen3-Reranker-0.6B (greedy completion + sampling-row
   yes/no softmax, ~13ms/candidate on GPU) within a hard
-  `MEMORY_RERANK_BUDGET_MS=500` budget that includes model-slot load; over
+  `MEMORY_RERANK_BUDGET_MS=1500` budget that includes model load; over
   budget or any error → RRF order stands (fail-open). Ties break by `updated_at`
-  desc. The default points at the conventional model path — set `MEMORY_RERANK_MODEL=`
-  (empty) to disable.
+  desc. Auto resolves to the conventional model path — set a path to force on,
+  `MEMORY_RERANK_MODEL=` (empty) to disable.
 
 ## Capacity & alerting (observability, not interruptions)
 

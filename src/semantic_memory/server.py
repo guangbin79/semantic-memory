@@ -35,11 +35,12 @@ from .web import INDEX_HTML
 from ._compat import HAS_NUMPY, INSTALL_HINT
 from . import gpu_breaker
 from .cloud import Consolidator
-from .config import Config
+from .config import (AUTO_MARGIN_MIB, AUTO_RESIDENCY_MIB, RERANK_GGUF_NAME,
+                     Config, auto_rerank_enabled)
 from .consistency import run_sweep
 from .db import MemoryStore
 from .distiller import Distiller
-from .embedder import Embedder
+from .embedder import Embedder, _card_free_mib
 from .graph import cross_project_extras, graph_edges
 from .hybrid import hybrid_recall
 from .lifecycle import (
@@ -52,8 +53,8 @@ from .lifecycle import (
     stamp_recalled,
 )
 from .project import backfill_project_keys, resolve_project
-from .modelslot import ModelSlot
-from .paths import MigrationError, MigrationRefused, migrate_legacy, resolve_data_dir
+from .paths import (MigrationError, MigrationRefused, default_model_path,
+                    migrate_legacy, resolve_data_dir)
 from .reranker import Reranker
 from .startup_gate import check_startup
 
@@ -120,7 +121,7 @@ def _record_recall(ms: float) -> None:
 # ---------------- 惰性核心单例（v0.3：import 零副作用） ----------------
 # import 本模块不触发迁移/开库/建模型（--help、setup、测试收集零成本）；
 # 首次属性访问（server.cfg/store/...）或 main() 才物化，物化后写入模块 globals。
-_CORE_SINGLETONS = ("cfg", "store", "embedder", "_slot", "reranker", "distiller", "consolidator")
+_CORE_SINGLETONS = ("cfg", "store", "embedder", "reranker", "distiller", "consolidator")
 _core_lock = threading.Lock()
 _core_built = False
 
@@ -135,13 +136,25 @@ def _build_core() -> dict:
         raise SystemExit(2) from e
     cfg = Config.from_env()
     store = MemoryStore(cfg.db_path)
+    # rerank 三态落地：显式路径/"" 直接用；auto → 任何模型加载前探测整卡空闲，
+    # ≥ 三模型常驻+余量 → 3 常驻启用重排，否则 2 常驻关闭（RRF 直出）。
+    rerank_path = cfg.rerank_model
+    if rerank_path is None and cfg.rerank_auto:
+        free_mib = _card_free_mib()
+        rerank_on = auto_rerank_enabled(free_mib, cfg.device)
+        if rerank_on:
+            rerank_path = default_model_path(RERANK_GGUF_NAME)
+        log.info("rerank auto: device=%s free=%sMiB 阈值=%dMiB → %s",
+                 cfg.device, free_mib, AUTO_RESIDENCY_MIB + AUTO_MARGIN_MIB,
+                 "3 模型常驻，重排启用" if rerank_on else "2 模型常驻，重排关闭")
     embedder = Embedder(cfg.model_path, dim=cfg.embed_dim, device=cfg.device)
-    _slot = ModelSlot()  # 单槽分时：rerank 与 distill 互斥换载（embedder 常驻槽外）
     return {
-        "cfg": cfg, "store": store, "embedder": embedder, "_slot": _slot,
-        "reranker": Reranker(cfg.rerank_model, device=cfg.device,
-                              budget_ms=cfg.rerank_budget_ms, slot=_slot),
-        "distiller": Distiller(cfg.distill_model, cfg.device, slot=_slot),
+        "cfg": cfg, "store": store, "embedder": embedder,
+        # 三模型各自常驻（2026-10-29 废弃单槽分时，换载开销真机不可接受）：
+        # Reranker/Distiller 各持私有槽，单 occupant 永不换载。
+        "reranker": Reranker(rerank_path, device=cfg.device,
+                              budget_ms=cfg.rerank_budget_ms),
+        "distiller": Distiller(cfg.distill_model, cfg.device),
         "consolidator": Consolidator(
             cfg.cloud_base_url, cfg.cloud_api_key, cfg.cloud_model,
             enabled=cfg.cloud_enabled, daily_max_calls=cfg.cloud_daily_max_calls,
