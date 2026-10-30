@@ -661,6 +661,13 @@ def test_supersede_bad_by_400(client):
     assert client.post("/supersede", json={"uid": uid, "by": gone}).status_code == 400
 
 
+def test_supersede_self_reference_400(client):
+    """评审环 R1：uid==by 自我退役 → 400——自指被幂等保护永久锁死且自环边，
+    一次调用方笔误即不可逆（与 _cmd_supersede / cloud 通道同款守卫）。"""
+    uid = _sup_ingest(client, "消息队列统一走 nats SupDep10")
+    assert client.post("/supersede", json={"uid": uid, "by": uid}).status_code == 400
+
+
 def test_superseded_entry_still_listed_with_by(client):
     """⑤退役后管理面 /api/memories 仍含该条且带 superseded_by（审计留痕，不滤）。"""
     old = _sup_ingest(client, "包管理器统一走 pipenv SupDep8")

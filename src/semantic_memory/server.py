@@ -502,12 +502,15 @@ def rest_supersede(body: dict) -> dict | tuple[int, dict]:
     """人工退役端点（agent 会话冲突裁决后的确定性通道；LLM 自动通道在 cloud.py）。
 
     UPDATE 与 cloud.Consolidator / _cmd_supersede 同款 WHERE：只接未删除且
-    未退役的条目——不覆盖首次 superseded_by（幂等保护）；不校验同 project
-    （人工通道信任调用方）。404=uid 不存在，409=已删/已退役，400=by 无效。
+    未退役的条目——不覆盖首次 superseded_by（幂等保护）；不校验同 project、
+    by 不要求未退役（悬挂接替链，均人工通道信任调用方）。
+    404=uid 不存在，409=已删/已退役，400=by 无效或 uid==by。
     """
     uid, by = body.get("uid"), body.get("by")
     if not isinstance(uid, str) or not isinstance(by, str):
         return 400, {"error": "uid/by must be strings"}
+    if uid == by:  # 自指被幂等保护永久锁死（还产生自环 superseded_by）——入口即拒
+        return 400, {"error": "uid must differ from by", "uid": uid}
     row = store.conn.execute(
         "SELECT deleted, superseded_by FROM memories WHERE uid=?", (uid,)).fetchone()
     if row is None:
