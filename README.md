@@ -367,6 +367,7 @@ hook-facing `/recall` `/ingest`, same auth rule: Bearer when `MEMORY_TOKEN` is s
 | `POST /inject/report` | Injection telemetry report (plugin/adapter channel, append-only) |
 | `POST /idle` | Notify idle: flush the distill queue in a daemon thread (204 immediately, auth = /ingest) |
 | `DELETE /api/memories/{uid}` | Single-entry forget (same trust level as the CLI) |
+| `POST /supersede` | Manual retire: body `{"uid","by"}` — mark uid superseded by by, zero physical delete (recall stops returning it) → 200 `{ok,uid,superseded_by}`; 400 missing/unknown `by` or `uid==by`, 404 unknown uid, 409 already deleted/superseded (idempotent, first pointer never overwritten); CLI twin: `semantic-memory supersede <old> --by NEW` |
 | `POST /api/maintenance/purge` | Bulk maintenance (soft-delete purge + TTL + VACUUM) |
 | `POST /api/maintenance/backfill` | Vector backfill for vectorless entries |
 
