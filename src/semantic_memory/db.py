@@ -652,7 +652,8 @@ class MemoryStore:
         offset: int = 0,
     ) -> list[sqlite3.Row]:
         sql = (
-            "SELECT uid, content, kind, source, project, tags, created_at, updated_at"
+            "SELECT uid, content, kind, source, project, tags, created_at, updated_at,"
+            " superseded_by"
             " FROM memories WHERE deleted = 0"
         )
         params: list = []

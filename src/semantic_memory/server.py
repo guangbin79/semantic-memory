@@ -1,6 +1,6 @@
 """语义记忆服务：stdlib http.server 单进程 REST 面。
 
-ThreadingHTTPServer + BaseHTTPRequestHandler 分发：12 条端点（11 静态 +
+ThreadingHTTPServer + BaseHTTPRequestHandler 分发：13 条端点（12 静态 +
 DELETE /api/memories/{uid}），函数体与鉴权规则与旧外壳逐条等价。
 
 HTTP 硬性属性（评审钉死）：
@@ -342,7 +342,8 @@ def api_memories(q: dict) -> dict | tuple[int, dict]:
     return {"memories": [
         {"uid": r["uid"], "content": r["content"], "kind": r["kind"],
          "source": r["source"], "project": r["project"], "tags": r["tags"],
-         "created_at": r["created_at"], "updated_at": r["updated_at"]}
+         "created_at": r["created_at"], "updated_at": r["updated_at"],
+         "superseded_by": r["superseded_by"]}
         for r in rows
     ]}
 
@@ -497,6 +498,37 @@ def rest_ingest(body: dict) -> dict | tuple[int, dict]:
     return {"uid": uid, "deduped": deduped, "project": project}
 
 
+def rest_supersede(body: dict) -> dict | tuple[int, dict]:
+    """人工退役端点（agent 会话冲突裁决后的确定性通道；LLM 自动通道在 cloud.py）。
+
+    UPDATE 与 cloud.Consolidator / _cmd_supersede 同款 WHERE：只接未删除且
+    未退役的条目——不覆盖首次 superseded_by（幂等保护）；不校验同 project
+    （人工通道信任调用方）。404=uid 不存在，409=已删/已退役，400=by 无效。
+    """
+    uid, by = body.get("uid"), body.get("by")
+    if not isinstance(uid, str) or not isinstance(by, str):
+        return 400, {"error": "uid/by must be strings"}
+    row = store.conn.execute(
+        "SELECT deleted, superseded_by FROM memories WHERE uid=?", (uid,)).fetchone()
+    if row is None:
+        return 404, {"error": "not found", "uid": uid}
+    if row["deleted"] or row["superseded_by"] is not None:
+        return 409, {"error": "already deleted or superseded", "uid": uid,
+                     "superseded_by": row["superseded_by"]}
+    if not store.conn.execute(
+            "SELECT 1 FROM memories WHERE uid=? AND deleted=0", (by,)).fetchone():
+        return 400, {"error": "by must be an existing live memory", "by": by}
+    with store.conn:
+        cur = store.conn.execute(
+            "UPDATE memories SET superseded_by=?, superseded_at=?"
+            " WHERE uid=? AND deleted=0 AND superseded_by IS NULL",
+            (by, time.time(), uid),
+        )
+    if cur.rowcount == 0:  # 并发窗口内已被抢先退役：WHERE 保证未覆盖，如实回 409
+        return 409, {"error": "already superseded", "uid": uid}
+    return {"ok": True, "uid": uid, "superseded_by": by}
+
+
 def inject_report(body: dict) -> tuple[int, dict]:
     """注入遥测上报（插件/适配器信道，只追加不删除）。
 
@@ -541,7 +573,7 @@ def _authorized(headers) -> bool:
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 _MAX_BODY_BYTES = 8 * 1024 * 1024  # 回环个人服务；嵌入文本量级远小于此
 _JSON_POST_PATHS = frozenset({
-    "/recall", "/ingest", "/inject/report",
+    "/recall", "/ingest", "/supersede", "/inject/report",
     "/api/maintenance/purge", "/api/maintenance/backfill",
 })
 
@@ -729,6 +761,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                     return self._send_h(rest_recall(parsed))
                 if path == "/ingest":
                     return self._send_h(rest_ingest(parsed))
+                if path == "/supersede":
+                    return self._send_h(rest_supersede(parsed))
                 if path == "/inject/report":
                     status, payload = inject_report(parsed)
                     return self._send_json(payload, status)

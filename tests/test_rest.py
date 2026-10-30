@@ -610,3 +610,63 @@ def test_recall_conflict_skips_missing_vectors(client):
     hits = [h for h in r.json()["hits"] if h.get("project") == "novec-proj"]
     assert len(hits) == 2
     assert all(not h.get("conflict") for h in hits)
+
+
+# ---------------- 人工退役端点 POST /supersede（确定性通道，LLM 自动通道在 cloud.py） ----------------
+
+def _sup_ingest(client, content):
+    return client.post("/ingest", json={
+        "content": content, "kind": "decision", "source": "remember",
+        "project": "sup-proj"}).json()["uid"]
+
+
+def test_supersede_ok_and_recall_follows_successor(client):
+    """①正常退役：200 {ok, uid, superseded_by}；recall 不再返回旧条，接替条照常召回。"""
+    old = _sup_ingest(client, "部署方式统一走容器编排 SupDep1")
+    new = _sup_ingest(client, "部署方式统一走虚拟机 SupDep2")
+    r = client.post("/supersede", json={"uid": old, "by": new})
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "uid": old, "superseded_by": new}
+    uids = [h["uid"] for h in client.post("/recall", json={
+        "query": "部署方式统一", "limit": 10, "project": "sup-proj"}).json()["hits"]]
+    assert old not in uids and new in uids
+
+
+def test_supersede_unknown_uid_404(client):
+    """②uid 不存在 → 404。"""
+    r = client.post("/supersede", json={"uid": "no-such-uid", "by": "also-nothing"})
+    assert r.status_code == 404
+
+
+def test_supersede_repeat_409_keeps_first_by(client):
+    """③已退役再调 → 409，且首次 superseded_by 不被覆盖（幂等保护）。"""
+    old = _sup_ingest(client, "日志收集统一走 filebeat SupDep3")
+    first = _sup_ingest(client, "日志收集统一走 vector SupDep4")
+    second = _sup_ingest(client, "日志收集统一走 fluentbit SupDep5")
+    assert client.post("/supersede", json={"uid": old, "by": first}).status_code == 200
+    r = client.post("/supersede", json={"uid": old, "by": second})
+    assert r.status_code == 409
+    row = server.store.conn.execute(
+        "SELECT superseded_by FROM memories WHERE uid=?", (old,)).fetchone()
+    assert row["superseded_by"] == first
+
+
+def test_supersede_bad_by_400(client):
+    """④by 缺失/不存在/已删除 → 400。"""
+    uid = _sup_ingest(client, "缓存层统一走 redis SupDep6")
+    gone = _sup_ingest(client, "缓存层统一走 memcached SupDep7")
+    client.delete(f"/api/memories/{gone}")
+    assert client.post("/supersede", json={"uid": uid}).status_code == 400
+    assert client.post("/supersede", json={"uid": uid, "by": "no-such-uid"}).status_code == 400
+    assert client.post("/supersede", json={"uid": uid, "by": gone}).status_code == 400
+
+
+def test_superseded_entry_still_listed_with_by(client):
+    """⑤退役后管理面 /api/memories 仍含该条且带 superseded_by（审计留痕，不滤）。"""
+    old = _sup_ingest(client, "包管理器统一走 pipenv SupDep8")
+    new = _sup_ingest(client, "包管理器统一走 uv SupDep9")
+    client.post("/supersede", json={"uid": old, "by": new})
+    rows = client.get("/api/memories",
+                      params={"project": "sup-proj", "limit": 200}).json()["memories"]
+    entry = next(m for m in rows if m["uid"] == old)
+    assert entry["superseded_by"] == new
