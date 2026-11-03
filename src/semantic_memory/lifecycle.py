@@ -8,10 +8,13 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 import threading
 import time
 import uuid
+from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Final
 
 from . import gpu_breaker
@@ -22,6 +25,7 @@ from .db import INSERT_MEMORY_SQL, MemoryStore, content_hash
 from .distiller import DistillParseError, Distiller
 from .embedder import Embedder
 from .noise import is_task_event_noise, strip_noise_lines
+from .paths import resolve_data_dir
 
 log = logging.getLogger("semantic_memory.lifecycle")
 
@@ -477,3 +481,141 @@ def backfill_vectors(
         total += len(rows)
         log.info("backfill progress: %d", total)
     return {"vectorized": total, "device": embedder.device}
+
+
+# ---------------- 夜扫（噪声兜底清扫：定时全库扫＋疑似晨报，ag-bb3029） ----------------
+# 噪声闸（noise.py）拦新垃圾于入库时，历史漏网与未知变体由本清扫兜底：
+# 确定性谓词命中→自动 forget 软删（安全：谓词确定性强＋软删留恢复窗口）；
+# 疑似（谓词未命中但弱信号齐）→只进报告不动。黑名单规则升级不在此路
+# （过拟合静默误杀风险，仍走派发评审）。
+
+_noise_sweep_lock = threading.Lock()
+
+# 凭据独立兜底（不依赖 noise.py 凭据短路是否随基线合并，单独实现于此）
+_SWEEP_CRED_TOKEN = re.compile(r"token[:：]\s*[0-9a-zA-Z_\-]{40,}", re.IGNORECASE)
+# 疑似弱信号三件套：[agora] task 前缀＋裸 40hex＋状态词
+_BARE_HEX40 = re.compile(r"(?<![0-9a-f])[0-9a-f]{40}(?![0-9a-f])")
+_WEAK_STATUS = re.compile(
+    r"done|completed|closed|merged|blocked|已 done|已 closed|已 blocked|已完成|已关闭|已取消",
+    re.IGNORECASE)
+
+
+def _credential_hit(content: str) -> bool:
+    return ("[agora] credential" in content
+            or "pypi-AgEI" in content
+            or _SWEEP_CRED_TOKEN.search(content) is not None)
+
+
+def _weak_signals(content: str) -> list[str]:
+    sigs = []
+    if content.lstrip().startswith("[agora] task"):
+        sigs.append("[agora] task 前缀")
+    if _BARE_HEX40.search(content):
+        sigs.append("裸40hex")
+    if _WEAK_STATUS.search(content):
+        sigs.append("状态词")
+    return sigs
+
+
+def _brief(content: str, cap: int = 80) -> str:
+    flat = " ".join(content.split())
+    return flat if len(flat) <= cap else flat[: cap - 1] + "…"
+
+
+def noise_sweep(store: MemoryStore, dry_run: bool = False, page_size: int = 200) -> dict:
+    """夜扫一次：全库活条目过噪声谓词，命中→forget 软删；疑似→只进晨报。
+
+    单飞与 flush 同款：已有实例在跑则本次跳过。凭据族独立兜底直接命中。
+    dry_run=True 零写入，报告照常带 forgotten 候选。
+    分页自补偿：软删行使 deleted=0 窗口前移，offset 回退等量防跳页；
+    seen 防并发插入致窗口重扫时重复报告。
+    """
+    if not _noise_sweep_lock.acquire(blocking=False):
+        return {"skipped": "noise sweep already running"}
+    try:
+        forgotten: list[dict] = []
+        suspicious: list[dict] = []
+        seen: set[str] = set()
+        scanned = 0
+        offset = 0
+        while True:
+            total, rows = store.list_page(limit=page_size, offset=offset)
+            if not rows:
+                break
+            removed = 0
+            for row in rows:
+                uid = row["uid"]
+                if uid in seen:
+                    continue
+                seen.add(uid)
+                scanned += 1
+                content = row["content"]
+                if _credential_hit(content) or is_task_event_noise(content):
+                    if not dry_run:
+                        store.forget(uid)
+                        removed += 1
+                    forgotten.append({"uid": uid, "kind": row["kind"],
+                                      "summary": _brief(content)})
+                else:
+                    weak = _weak_signals(content)
+                    if len(weak) == 3:  # 三弱信号齐＝疑似，报告不删
+                        suspicious.append({"uid": uid, "summary": _brief(content),
+                                           "weak_signals": weak})
+            offset += len(rows) - removed
+            if offset >= total:
+                break
+        report: dict = {"scanned": scanned, "forgotten": forgotten,
+                        "suspicious": suspicious}
+        if dry_run:
+            report["dry_run"] = True
+        return report
+    finally:
+        _noise_sweep_lock.release()
+
+
+def _parse_sweep_at(at: str) -> tuple[int, int]:
+    """MEMORY_NOISE_SWEEP_AT "HH:MM" → (hour, minute)；非法即抛（启动 fail-fast）。"""
+    parts = at.strip().split(":")
+    if len(parts) != 2:
+        raise ValueError(f"MEMORY_NOISE_SWEEP_AT 应为 HH:MM，得到 {at!r}")
+    hh, mm = int(parts[0]), int(parts[1])
+    if not (0 <= hh <= 23 and 0 <= mm <= 59):
+        raise ValueError(f"MEMORY_NOISE_SWEEP_AT 超出 0-23:0-59，得到 {at!r}")
+    return hh, mm
+
+
+def _next_sweep_run(hh: int, mm: int, now: datetime) -> datetime:
+    nxt = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+    if nxt <= now:
+        nxt += timedelta(days=1)
+    return nxt
+
+
+def write_noise_sweep_log(report: dict) -> Path:
+    """报告落 <data_dir>/logs/noise-sweep-YYYYMMDD.log（日志不进记忆库自身）。"""
+    log_dir = resolve_data_dir() / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    path = log_dir / f"noise-sweep-{datetime.now():%Y%m%d}.log"
+    body = json.dumps({"at": datetime.now().isoformat(timespec="seconds"), **report},
+                      ensure_ascii=False)
+    path.write_text(body + "\n", encoding="utf-8")
+    return path
+
+
+def _noise_sweep_daemon(store: MemoryStore, at: str) -> None:
+    hh, mm = _parse_sweep_at(at)
+    while True:
+        now = datetime.now()
+        time.sleep(max(0.0, (_next_sweep_run(hh, mm, now) - now).total_seconds()))
+        try:
+            report = noise_sweep(store)
+            if "skipped" not in report:  # 手动端点在跑则让位，不写日志
+                write_noise_sweep_log(report)
+            log.info("noise sweep: %s", json.dumps(report, ensure_ascii=False))
+        except Exception:
+            log.exception("noise sweep failed")
+
+
+def start_noise_sweep_daemon(store: MemoryStore, at: str) -> None:
+    threading.Thread(target=_noise_sweep_daemon, args=(store, at),
+                     daemon=True, name="noise-sweep").start()

@@ -126,6 +126,24 @@ def test_bulk_guard_401_and_200_with_token(client, with_token):
     assert r.status_code == 200 and "total_removed" in r.json()
 
 
+def test_noise_sweep_endpoint_bulk_guard_403_without_token(client):
+    r = client.post("/api/maintenance/noise_sweep", json={})
+    assert r.status_code == 403 and "MEMORY_TOKEN" in r.json()["error"]
+
+
+def test_noise_sweep_endpoint_auth_and_dry_run(client, with_token):
+    assert client.post("/api/maintenance/noise_sweep", json={}).status_code == 401
+    assert client.post("/api/maintenance/noise_sweep", json={},
+                       headers={"authorization": "Bearer bad"}).status_code == 401
+    r = client.post("/api/maintenance/noise_sweep", json={"dry_run": True},
+                    headers={"authorization": "Bearer secret"})
+    assert r.status_code == 200 and r.json()["dry_run"] is True
+    assert "scanned" in r.json() and "suspicious" in r.json()
+    r = client.post("/api/maintenance/noise_sweep", json={},  # body 可带 dry_run:true（缺省 False）
+                    headers={"authorization": "Bearer secret"})
+    assert r.status_code == 200 and "dry_run" not in r.json()
+
+
 def test_read_routes_require_auth_when_token_set(client, with_token):
     assert client.get("/api/stats").status_code == 401
     assert client.get("/api/stats",

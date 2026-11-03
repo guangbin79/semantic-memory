@@ -103,6 +103,7 @@ class Config:
     ttl_injection_days: int    # 注入遥测 TTL；0 = 不过期
     ttl_stale_days: int        # 使用度留存：fact/artifact 未召回超此天数清除；0 = 关闭
     maintenance_on_start: bool # 启动时跑维护例程
+    noise_sweep_at: str        # 夜扫噪声清扫每日定点 "HH:MM"；调度线程常驻服务内
     dedup_sim: float           # 向量近似去重阈值（同 project 内）
     # ---- 重排（completions logprobs 法；调用面接线在 hybrid 召回）----
     rerank_model: Path | None  # Qwen3-Reranker GGUF；None → 重排关闭（RRF 序直出）
@@ -205,6 +206,7 @@ class Config:
             maintenance_on_start=_bool(
                 "MEMORY_MAINTENANCE_ON_START", "maintenance_on_start",
                 True, lambda v: v == "1"),
+            noise_sweep_at=s("MEMORY_NOISE_SWEEP_AT", "noise_sweep_at", "03:30"),
             dedup_sim=float(s("MEMORY_DEDUP_SIM", "dedup_sim", "0.98")),
             rerank_model=Path(rerank_model) if rerank_model.strip() else None,
             rerank_auto=rerank_auto,

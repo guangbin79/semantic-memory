@@ -1,6 +1,6 @@
 """语义记忆服务：stdlib http.server 单进程 REST 面。
 
-ThreadingHTTPServer + BaseHTTPRequestHandler 分发：13 条端点（12 静态 +
+ThreadingHTTPServer + BaseHTTPRequestHandler 分发：14 条端点（12 静态 +
 DELETE /api/memories/{uid}），函数体与鉴权规则与旧外壳逐条等价。
 
 HTTP 硬性属性（评审钉死）：
@@ -50,7 +50,9 @@ from .lifecycle import (
     enqueue_raw,
     flush_distill_queue,
     ingest_with_dedup,
+    noise_sweep,
     run_maintenance,
+    start_noise_sweep_daemon,
     stamp_recalled,
 )
 from .project import backfill_project_keys, resolve_project
@@ -403,6 +405,10 @@ def api_maintenance_backfill() -> dict:
     return backfill_vectors(store, embedder)
 
 
+def api_maintenance_noise_sweep(body: dict) -> dict:
+    return noise_sweep(store, dry_run=bool(body.get("dry_run")))
+
+
 def rest_recall(body: dict) -> dict | tuple[int, dict]:
     q = body.get("query")
     if not isinstance(q, str):
@@ -583,6 +589,7 @@ _MAX_BODY_BYTES = 8 * 1024 * 1024  # 回环个人服务；嵌入文本量级远�
 _JSON_POST_PATHS = frozenset({
     "/recall", "/ingest", "/supersede", "/inject/report",
     "/api/maintenance/purge", "/api/maintenance/backfill",
+    "/api/maintenance/noise_sweep",
 })
 
 
@@ -776,6 +783,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                     return self._send_json(payload, status)
                 if path == "/api/maintenance/purge":
                     return self._send_json(api_maintenance_purge())
+                if path == "/api/maintenance/noise_sweep":
+                    return self._send_json(api_maintenance_noise_sweep(parsed))
                 return self._send_json(api_maintenance_backfill())
             return self._send_json({"error": "not found"}, 404)
 
@@ -836,6 +845,7 @@ def _install_exit_handler() -> None:
 def serve() -> None:
     """HTTP 主循环：ThreadingHTTPServer 构造即绑定（port=0 时读回真实端口）→ 发布 → 常驻。"""
     _install_exit_handler()
+    start_noise_sweep_daemon(store, cfg.noise_sweep_at)  # 夜扫：每日定点全库清扫＋晨报
     httpd = http.server.ThreadingHTTPServer((cfg.host, cfg.port), _Handler)
     httpd.daemon_threads = True
     _announce(httpd.server_address[1])
