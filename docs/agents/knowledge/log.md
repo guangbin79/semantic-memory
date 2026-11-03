@@ -2,6 +2,11 @@
 
 > 追加式；每次 ingest 一节。格式：`## [{date}] ingest | {module-name}`
 
+## [2026-11-03] ingest | opencode-plugin
+- 客户端停发闸 agoraEventNoise：①②移植 noise.py 词表残差判定、③派发页回显（首行任务 id＋三件套）④凭据保守正则；prompt 入队前＋compaction transcript＋显式「记住：」三挂点（记住路径命中即吞防前缀击穿），含正文回执放行（宁漏勿误）
+- 词表按样本收编：「同步冲突：main@」三短语＋cancel——hotmem 2029 条 chat 差分实证 TS 300 ⊇ 服务端 118、零回退；凭据卫生取舍：正文含原始 token 的知识不进库
+- 部署副本领先 repo 两处增量（memory_supersede 注册＋冲突指引）已回搬，diff 归零；先例：部署热修必须回搬 repo，否则以 repo 部署即丢工具
+
 ## [2026-10-20] ingest | opencode-plugin
 - 建库首录：opencode 插件静默加载失败三层根因（file:// 配置不支持／@opencode/plugin 依赖无处解析／失败无日志）与修复安装路径（plugins/ 目录＋config 目录依赖）；附存在性探针与 autostart 语义
 

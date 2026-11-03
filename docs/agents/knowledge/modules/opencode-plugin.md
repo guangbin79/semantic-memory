@@ -1,6 +1,6 @@
 # opencode 集成插件（opencode-plugin）
 
-> Last updated: 2026-10-22 · 插件本体 `integrations/opencode/memory.ts`，装于 `~/.config/opencode/plugins/`；服务为独立 Python 进程（127.0.0.1:8765），插件仅是它的无状态 HTTP 客户端。
+> Last updated: 2026-11-03 · 插件本体 `integrations/opencode/memory.ts`，装于 `~/.config/opencode/plugins/`；服务为独立 Python 进程（127.0.0.1:8765），插件仅是它的无状态 HTTP 客户端。
 
 ## 架构要点
 
@@ -9,6 +9,14 @@
 - autostart（`MEMORY_PLUGIN_AUTOSTART=1`）＝插件发现 /health 不通时顺手 spawn 服务；不设则服务死了永远静默躺平
 
 ## Decisions
+
+### 客户端停发 agora 事件回执（2026-11-03）
+- **Id:** opencode-plugin/agora-receipt-client-gate
+- **Source:** session ses_e60870da3ffer4fDo3Q7EEQQh3（2026-11-03，ag-f10b60）
+- **Decision:** 插件新增导出谓词 `agoraEventNoise(text)`：①任务回执＋②门事件移植服务端 noise.py 词表残差判定（≤400 字符＋逐行残余全落词表＋状态关键词三条件）；③派发页回显（`[agora]` 开头＋首行任务 id＋page:/env:/contract: 三件套——id 绑定抬伪造门槛）与④凭据（credential 信封/token:+40hex 中缀/pypi-AgEI 前缀）走保守正则。prompt 钩子入队前整条判定跳过；显式「记住：」路径命中即吞（captureRemember 返回「已处理」语义——返回 false 会让钩子落入 chat 捕获，「记住：」前缀击穿后续整条闸）；compaction transcriptText 剥除整条纯回执；note/process/answer 等含正文回执一律放行（宁漏勿误）。凭据卫生取舍：正文含原始 token 的知识不进库（2026-10-29 自反馈实证，宁失一条知识不引入召回回路）
+- **Reason:** 服务端 noise 闸（1d8a06c）只在入库侧拦截，客户端每条回执仍白寄一次 POST；hotmem 库实证 727/2029（36%）chat 条目为 agora 噪声。词表外按样本收编 3 条「同步冲突：main@ vs branch@」门禁样板＋cancel（family① 事件名，库中无 cancel 回执样本故 noise.py 词表缺）——TS 判定 300 条 ⊇ 服务端 118 条，2029 条真实 chat 零回退、4 个非 [agora] 命中全是 ②④ 独立形态（恰为任务书要求捕获的 standalone 样板与凭据）
+- **评审环（3 轮收敛）:** R1 三分册 A/B clean，C 册 3 warning（记住绕闸/token 正则空白大小写盲区/三件套无 id 成抑制原语）全修；R2 复审坐实 F4 fall-through 新洞（拒收返 false 落入 chat 捕获）——子代理复审与 ocr_review 双路独立收敛同一修法，改「命中即吞」；R3 clean 收口
+- **Supplements:** 部署副本曾领先 repo 两处（memory_supersede 工具注册＋冲突指引文案），已逐字回搬（ag-f10b60）——部署副本与 repo diff 归零，repo 成超集；后续部署直接 cp，不再有热修领先窗口
 
 ### 插件安装走 plugins/ 目录＋config 目录依赖（2026-10-20）
 - **Id:** opencode-plugin/install-path
