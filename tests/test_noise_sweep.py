@@ -108,6 +108,18 @@ def test_credential_summary_elided_in_report(store):
     assert "5b8b071a" not in json.dumps(report)
 
 
+def test_quoted_token_summary_elided_too(store):
+    # JSON 引号包装形态：删除命中 noise.py 凭据族，sweep 私有兜底不中——
+    # 摘要省略判定取并集（终闸 B/C 收敛 finding）
+    uid = store.store(
+        content='{"token": "0123456789abcdef0123456789abcdef0123456789abcdef01"}',
+        kind="fact", source="chat")
+    report = noise_sweep(store)
+    entry = next(f for f in report["forgotten"] if f["uid"] == uid)
+    assert entry["summary"] == "[credential elided]"
+    assert "0123456789abcdef" not in json.dumps(report)
+
+
 def test_start_daemon_fail_fast_on_bad_at(store):
     with pytest.raises(ValueError):
         lifecycle.start_noise_sweep_daemon(store, "25:00")  # 线程 spawn 前同步抛

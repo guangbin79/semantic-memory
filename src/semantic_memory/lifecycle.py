@@ -24,7 +24,7 @@ from ._compat import np
 from .db import INSERT_MEMORY_SQL, MemoryStore, content_hash
 from .distiller import DistillParseError, Distiller
 from .embedder import Embedder
-from .noise import is_task_event_noise, strip_noise_lines
+from .noise import _is_credential, is_task_event_noise, strip_noise_lines
 from .paths import resolve_data_dir
 
 log = logging.getLogger("semantic_memory.lifecycle")
@@ -554,16 +554,19 @@ def noise_sweep(store: MemoryStore, dry_run: bool = False, page_size: int = 200)
                     if not dry_run:
                         store.forget(uid)
                         removed += 1
-                    # 凭据命中条目摘要省略：报告随日志落盘，摘要不得携带凭据原文
+                    # 摘要省略判定与删除谓词取并集（_is_credential 覆盖引号
+                    # 包装等 noise.py 全形态）：报告随日志落盘，不得携带凭据原文
                     forgotten.append({"uid": uid, "kind": row["kind"],
                                       "summary": "[credential elided]"
-                                      if _credential_hit(content) else _brief(content)})
+                                      if _is_credential(content) else _brief(content)})
                 else:
                     weak = _weak_signals(content)
                     if len(weak) == 3:  # 三弱信号齐＝疑似，报告不删
                         suspicious.append({"uid": uid, "summary": _brief(content),
                                            "weak_signals": weak})
             offset += len(rows) - removed
+            # 并发取舍：他人于此间删除已扫活行时窗口仍可能滑过未扫行——
+            # 单行天级延迟、次日定点扫自愈（软删无损，不为竞态加锁复杂度）
             if offset >= total:
                 break
         report: dict = {"scanned": scanned, "forgotten": forgotten,
@@ -611,9 +614,10 @@ def _noise_sweep_daemon(store: MemoryStore, at: str) -> None:
         time.sleep(max(0.0, (_next_sweep_run(hh, mm, now) - now).total_seconds()))
         try:
             report = noise_sweep(store)
-            if "skipped" not in report:  # 手动端点在跑则让位，不写日志
+            if "skipped" not in report:  # 手动端点在跑则让位
+                # 先 log.info 后落盘：写文件失败（目录占用/盘满）报告仍留服务日志
+                log.info("noise sweep: %s", json.dumps(report, ensure_ascii=False))
                 write_noise_sweep_log(report)
-            log.info("noise sweep: %s", json.dumps(report, ensure_ascii=False))
         except Exception:
             log.exception("noise sweep failed")
 
