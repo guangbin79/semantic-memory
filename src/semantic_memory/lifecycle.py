@@ -554,8 +554,10 @@ def noise_sweep(store: MemoryStore, dry_run: bool = False, page_size: int = 200)
                     if not dry_run:
                         store.forget(uid)
                         removed += 1
+                    # 凭据命中条目摘要省略：报告随日志落盘，摘要不得携带凭据原文
                     forgotten.append({"uid": uid, "kind": row["kind"],
-                                      "summary": _brief(content)})
+                                      "summary": "[credential elided]"
+                                      if _credential_hit(content) else _brief(content)})
                 else:
                     weak = _weak_signals(content)
                     if len(weak) == 3:  # 三弱信号齐＝疑似，报告不删
@@ -617,5 +619,6 @@ def _noise_sweep_daemon(store: MemoryStore, at: str) -> None:
 
 
 def start_noise_sweep_daemon(store: MemoryStore, at: str) -> None:
+    _parse_sweep_at(at)  # 线程前校验：非法即在 serve() 同步抛出，兑现启动 fail-fast
     threading.Thread(target=_noise_sweep_daemon, args=(store, at),
                      daemon=True, name="noise-sweep").start()

@@ -1,6 +1,6 @@
 """语义记忆服务：stdlib http.server 单进程 REST 面。
 
-ThreadingHTTPServer + BaseHTTPRequestHandler 分发：14 条端点（12 静态 +
+ThreadingHTTPServer + BaseHTTPRequestHandler 分发：14 条端点（13 静态 +
 DELETE /api/memories/{uid}），函数体与鉴权规则与旧外壳逐条等价。
 
 HTTP 硬性属性（评审钉死）：

@@ -8,6 +8,7 @@ from datetime import datetime
 
 import pytest
 
+from semantic_memory import lifecycle
 from semantic_memory.db import MemoryStore
 from semantic_memory.lifecycle import (
     _next_sweep_run,
@@ -97,6 +98,19 @@ def test_single_flight_and_idempotent(store):
     noise_sweep(store)
     rerun = noise_sweep(store)  # 幂等：已清条目退出活集，重扫不再命中
     assert rerun["forgotten"] == [] and rerun["suspicious"] == []
+
+
+def test_credential_summary_elided_in_report(store):
+    uid = _seed(store, NOISE)["cred"]
+    report = noise_sweep(store)
+    entry = next(f for f in report["forgotten"] if f["uid"] == uid)
+    assert entry["summary"] == "[credential elided]"  # 摘要不携带凭据原文进日志
+    assert "5b8b071a" not in json.dumps(report)
+
+
+def test_start_daemon_fail_fast_on_bad_at(store):
+    with pytest.raises(ValueError):
+        lifecycle.start_noise_sweep_daemon(store, "25:00")  # 线程 spawn 前同步抛
 
 
 def test_parse_sweep_at():
