@@ -43,6 +43,7 @@ from .distiller import Distiller
 from .embedder import Embedder, _card_free_mib
 from .graph import cross_project_extras, graph_edges
 from .hybrid import hybrid_recall
+from .noise import is_task_event_noise
 from .lifecycle import (
     NEAR_LO,
     backfill_vectors,
@@ -479,6 +480,10 @@ def rest_ingest(body: dict) -> dict | tuple[int, dict]:
     content = body.get("content")
     if not isinstance(content, str):
         return 400, {"error": "content must be a string"}
+    # 噪声闸：纯任务状态回执（auto-chat 逐字捕获/显式 store 都在放行）——
+    # 入口即挡，与 unresolvable_project 丢弃形态对齐
+    if is_task_event_noise(content):
+        return {"queued": False, "dropped": "task_event_noise"}
     if source in QUEUED_SOURCES:
         pending = enqueue_raw(store, content, source, project,
                               body.get("session_id"))

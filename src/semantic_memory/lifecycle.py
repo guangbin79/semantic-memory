@@ -21,6 +21,7 @@ from ._compat import np
 from .db import INSERT_MEMORY_SQL, MemoryStore, content_hash
 from .distiller import DistillParseError, Distiller
 from .embedder import Embedder
+from .noise import is_task_event_noise, strip_noise_lines
 
 log = logging.getLogger("semantic_memory.lifecycle")
 
@@ -191,6 +192,10 @@ def flush_distill_queue(
     条数不 fail：超产 WARN+截断 result[:len(texts)] 按序绑定（超出条目丢
     弃），短缺 WARN+缺额行走 entry=None 原文直存——模型本无逐条 1:1 契
     约（2026-10-23 实证：条数守卫 fail 整组曾致队列积压 112 条）。
+    噪声闸（noise.py）：队列行先经行级滤洗，滤洗后为空的行（纯任务状态
+    回执/全噪声线）整行丢弃不蒸馏不落库；混合内容只送知识行，蒸馏输入
+    与非噪声队列行保持按序 1:1 绑定。raw 直存兜底（无裁判/蒸馏 None/短缺
+    缺额）仍写原文不滤洗——行级误杀对落库不可逆，宁漏勿误（有意取舍）。
     session_id 沿用队列行。
     """
     if not _flush_lock.acquire(blocking=False):
@@ -220,9 +225,18 @@ def flush_distill_queue(
             entries_by_project: dict = {}
             failed_projects: set = set()
             dropped_projects: set = set()  # SYSTEM_PROMPT 契约：[]＝该组全部不值得记
+            # 噪声闸（noise.py）：蒸馏输入按行级滤洗；滤洗后为空的行（纯状态
+            # 回执/全噪声线行）无知识可馏——空槽送蒸馏只会诱出垃圾释义并打破
+            # 按序绑定，故整行随行循环丢弃（dropped 计数可观测）
+            stripped = {r["id"]: strip_noise_lines(r["content"]) for r in rows}
+            noise_rows = {rid for rid, s in stripped.items() if not s}
             if distiller is not None:
                 for project in {r["project"] for r in rows}:
-                    texts = [r["content"] for r in rows if r["project"] == project]
+                    texts = [stripped[r["id"]] for r in rows
+                             if r["project"] == project
+                             and r["id"] not in noise_rows]
+                    if not texts:
+                        continue  # 整组全噪声：无蒸馏必要（空文本组会误触熔断）
                     neighbors = _band_neighbors(store, embedder, texts, project)
                     try:
                         result = distiller.distill(texts, project or "",
@@ -313,6 +327,12 @@ def flush_distill_queue(
                 if r["project"] in failed_projects:
                     left_pending += 1  # fail-closed：留 pending 待下次 flush
                     continue
+                if r["id"] in noise_rows:
+                    # 噪声闸：纯状态回执/全噪声线行不蒸馏不落库——滤洗后无
+                    # 知识行即整行丢弃（宁漏勿误见 noise.py，dropped 可观测）
+                    batch.append(("done", r["id"]))
+                    dropped += 1
+                    continue
                 if r["project"] in dropped_projects:
                     batch.append(("done", r["id"]))  # 蒸馏裁决：全部不值得记
                     dropped += 1
@@ -337,6 +357,11 @@ def flush_distill_queue(
                     pending_hash[content_hash(r["content"])] = raw_uid
                     batch.append(("stored_raw", r["id"]))
                     report["stored_raw"] += 1
+                    continue
+                if is_task_event_noise(entry["content"]):
+                    # 噪声闸：蒸馏对事件行再创作的释义仍是噪声 → 同行丢弃
+                    batch.append(("done", r["id"]))
+                    dropped += 1
                     continue
                 report["typed"] += 1
                 proj = None if entry["scope"] == "global" else r["project"]
