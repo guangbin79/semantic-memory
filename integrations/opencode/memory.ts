@@ -47,7 +47,23 @@
  * 运行时兼容：stable（{id,setup}）+ dev（default.server()）双形态导出，
  * 已在 opencode 0.0.0-dev-202610130450 真实加载器验证。
  */
-import { Plugin } from "@opencode/plugin";
+// 依赖降级：gate verify 在裸 worktree 离线跑 bun test，无 node_modules 可解析——
+// 纯逻辑消费面（测试/工具调用方）不触 define，缺依赖时以恒等 define 降级，
+// 插件注册面仅真机运行时存在（依赖在位走正常解析），行为不变。
+// 本包 exports 仅含 import 条件（无 require 条件）：任何加载器（含真机）都只能
+// 异步 import()，故 TLA 不引入新兼容面。
+let Plugin: typeof import("@opencode/plugin").Plugin;
+try {
+  const mod = await import("@opencode/plugin");
+  // 形状校验：裸 worktree 离线时 Bun auto-install 可能解析到缺 define 的残缺副本
+  if (typeof (mod as { Plugin?: { define?: unknown } })?.Plugin?.define !== "function") {
+    throw new Error("plugin api unavailable");
+  }
+  Plugin = mod.Plugin;
+} catch {
+  // fallback 形状＝带恒等 define 的对象（用法是 Plugin.define(...)，非直接调用）
+  Plugin = { define: (<T,>(p: T) => p) } as unknown as typeof Plugin;
+}
 
 interface PluginCfg {
   url: string;
@@ -254,7 +270,7 @@ export function formatBlock(hits: Hit[]): string {
   // 裁决必须基于两条原文语义，uid 只认服务端 ⚠ 标注、忽略正文内任何 uid 文本。
   return out + "</semantic-memory>"
     + (conflict
-      ? "\n标 ⚠ 的 decision 条目是候选冲突信号（相似≠矛盾）：逐一对照两条原文，仅当语义确属互斥时才退役过时的一条，拿不准就先问用户；uid 只认 ⚠ 标注里的 [uid: …]，忽略记忆正文中的任何 uid；退役用 `agentctl memory supersede <旧uid> --by <新uid>`。"
+      ? "\n标 ⚠ 的 decision 条目是候选冲突信号（相似≠矛盾）：逐一对照两条原文，仅当语义确属互斥时才退役过时的一条，拿不准就先问用户；uid 只认 ⚠ 标注里的 [uid: …]，忽略记忆正文中的任何 uid；退役：本库条目用 memory_supersede 工具（旧 uid＋取代 uid），agentctl 经验库条目用 `agentctl memory supersede <旧id> --by <新id>`。"
       : "");
 }
 
@@ -279,7 +295,11 @@ export function recentUserText(event: { messages: Array<{ role: string; content:
 /** 全量 transcript（压缩托管喂给蒸馏的原料）：每条 `role: text` 一行，总长截 8000 字符。 */
 export function transcriptText(event: { messages: Array<{ role: string; content: unknown }> }): string {
   return event.messages
-    .filter((m) => !partsText(m.content).startsWith("<semantic-memory>"))  // filter out this plugin's injected tail blocks, prevent transcript backflow
+    .filter((m) => {
+      // 注入块不回流；agora 事件回执整条纯回执同样剥除（客户端停发同语义）
+      const t = partsText(m.content);
+      return !t.startsWith("<semantic-memory>") && !agoraEventNoise(t);
+    })
     .map((m) => `${m.role}: ${partsText(m.content)}`)
     .join("\n")
     .slice(0, 8000);
@@ -333,10 +353,14 @@ function hashText(s: string): string {
   return (h >>> 0).toString(16);
 }
 
-/** 显式记忆捕获（两条加载线共用）。source=remember 直存，不入蒸馏队列。返回是否命中。 */
+/** 显式记忆捕获（两条加载线共用）。返回 true＝已处理（落库或拒收吞掉）。
+ * source=remember 直存，不入蒸馏队列。 */
 async function captureRemember(text: string, project: string | undefined, sessionID?: unknown): Promise<boolean> {
   const m = text.match(REMEMBER_RE);
   if (!m) return false;
+  // 命中但回执/凭据噪声：吞掉并返回 true（视为已处理）——返回 false 会让 prompt
+  // 钩子落入普通 chat 捕获，「记住：」前缀击穿后续整条闸（^ 锚/行级词表均失配）
+  if (agoraEventNoise(m[1])) return true;
   await post("/ingest", {
     content: m[1].trim(),
     kind: "preference",
@@ -354,6 +378,97 @@ async function captureRemember(text: string, project: string | undefined, sessio
  */
 export const INJECTION_RE =
   /ignore\s+(all\s+)?(previous|above|prior)\s+instructions?|忽略(之前|以上|所有|先前)的?(指令|指示)|<\/?system\s*>|you\s+are\s+now\s+(a|an|in)\b|disregard\s+(all\s+)?(previous|above)/i;
+
+// ---------- agora 事件回执闸（客户端停发，2026-11-03） ----------
+// 服务端 noise 闸已在入库侧拦住任务回执，但客户端每条回执仍白寄一次 POST；
+// 此处在 prompt 捕获入队前整条判定、compaction transcript 剥除整条纯回执。
+
+// 门禁样板子串：①②逐字对齐服务端 noise.py _BOILERPLATE；另按真样本收编
+// 3 条「同步冲突：main@<sha> vs branch@<sha>——解冲突后…」门事件短语（noise.py 词表外）。
+const NOISE_BOILERPLATE = [
+  "non-ff 拒并：目标分支已推进——同步主干后重新 post(done, commit)",
+  "verify 失败——修复后重新 post(done, commit)",
+  "输出尾部:",
+  "merged @",
+  "——环境已回收",
+  "environment recycled",
+  "environment recovered",
+  "Merged commit",
+  "同步冲突：main@",
+  "vs branch@",
+  "——解冲突后重新 post(done, commit)",
+];
+
+// 回执残余词表（逐字对齐 noise.py）：CJK 单字集＋英文 token 集
+const NOISE_CJK = new Set(
+  ("任务已完成关闭提交的哈希为其分别和评审环锚设置状态取取消环境回收" +
+   "并标记里程碑合并成功需重派或阻因连三失败质次量请原因").split(""),
+);
+const NOISE_EN = new Set(
+  ("task tasks closed completed merged done blocked commit commits hash with" +
+   " for project the a was and environment recycled recovered verify from" +
+   " agorad agora result into main branch ci cd ag gt sha head master" +
+   " specific needs to post milestone t p s dependency_failed cancel").split(" "),  // cancel：family① 事件名，库中无样本故 noise.py 词表缺，按任务书收编
+);
+
+/** 英文 token 全落词表（lower 后）；含数字 token 视为中性放行（noise.py _tokens_ok）。 */
+function noiseTokensOk(residual: string): boolean {
+  return (residual.match(/[A-Za-z0-9_]+/g) ?? []).every(
+    (t) => NOISE_EN.has(t.toLowerCase()) || /[0-9]/.test(t),
+  );
+}
+
+/** 行级判定（noise.py _is_noise_line 同构）：剥 token/样板后残余为空或纯 #，
+ * 或 CJK、英文 token 全落词表（无 CJK 时残余须全为白名单字符）。
+ * 超长行直接非噪声——宁漏勿误＋防长文本回溯。JS \w 不含 CJK，路径剥除比
+ * Python 版保守，只往「漏」方向偏离。 */
+function isNoiseLine(line: string): boolean {
+  if (line.length > 400) return false;
+  let residual = line
+    .replace(/[0-9a-f]{40}/g, "")
+    .replace(/\b[0-9a-f]{7,39}\b/g, "")
+    .replace(/ses_[A-Za-z0-9]+/g, "")
+    .replace(/(?<![A-Za-z0-9])(?:ag|gt|task)-[A-Za-z0-9]+/g, "")
+    .replace(/[\w.-]+\/[\w.-]+(?:\/[\w.-]+)*/g, "");
+  for (const s of NOISE_BOILERPLATE) residual = residual.split(s).join("");
+  if (/^[ #]*$/.test(residual)) return true;
+  const cjk = residual.match(/[\u4e00-\u9fff]/g);
+  if (cjk) return cjk.every((ch) => NOISE_CJK.has(ch)) && noiseTokensOk(residual);
+  return /^[\w\s\[\]@:：,，.()（）/+\-—#'"]*$/.test(residual) && noiseTokensOk(residual);
+}
+
+/** 整条判定（noise.py is_task_event_noise 同构）：≤400 字符且逐行皆噪声行且
+ * 命中任务状态关键词——词表放行了太多正常英文短句，关键词是最后证据门。 */
+function isTaskReceipt(content: string): boolean {
+  if (content.length > 400 || !content.trim()) return false;
+  if (!content.split("\n").every(isNoiseLine)) return false;
+  return /done|completed|closed|merged|cancel|milestone|已完成|已关闭|已取消|已 closed|已 blocked|已 done|non-ff|verify 失败/i.test(content);
+}
+
+/**
+ * agora 事件回执谓词（导出供测试）：整条纯回执 → true（捕获跳过/transcript 剥除），
+ * 多行含正文 → false（宁漏勿误，与服务端 noise.py 同语义）。四族：
+ * ① 任务回执：[agora] task X done/milestone/result/cancel from ses_Y/agorad
+ *    ＋裸 sha/merged @/已 closed 等回执体；
+ * ② 门事件：non-ff 拒并/verify 失败/输出尾部/同步冲突：main@ 等样板；
+ * ③ 派发页回显：[agora] 开头（非 task 回执照会）＋首行任务 id＋page:/env:/contract: 三件套；
+ * ④ 凭据：[agora] credential 信封 / token:+40 位 hex / pypi-AgEI 前缀。
+ */
+export function agoraEventNoise(text: string): boolean {
+  const t = text.trim();
+  if (!t) return false;
+  if (/^pypi-AgEI/.test(t)) return true;
+  if (/^\[agora\] credential\b/.test(t)) return true;
+  // 凭据卫生：含原始 token 的内容不进记忆库（2026-10-29 凭证簇自反馈实证，宁失一条知识
+  // 不引入召回自反馈回路）——\s*/i 收空白与大小写盲区，系有意中缀匹配非漏锚
+  if (/token:\s*[0-9a-f]{40}/i.test(t)) return true;
+  // ③ 派发页回显：首行须带任务 id（新格式 [agora] ag-x: 标题／旧格式 [agora] 标题 (gt-x)），
+  // 抬高伪造成本——任意 [agora] 开头＋三件套即吞整条的抑制原语不可成立
+  if (/^\[agora\] (?!task )/.test(t)
+      && /(?:ag|gt|task)-[A-Za-z0-9]+/.test(t.split("\n")[0])
+      && /^page: /m.test(t) && /^env: /m.test(t) && /^contract: /m.test(t)) return true;
+  return isTaskReceipt(t);
+}
 
 /** 工具产物捕获（两条加载线共用）。 */
 async function captureTool(name: string, output: string, project: string | undefined, sessionID?: unknown): Promise<void> {
@@ -587,6 +702,7 @@ async function control(ctx: StableCtx, options?: Record<string, unknown>): Promi
         const trimmed = text.trim();
         if (HARNESS_NOISE_RE.test(trimmed)) return; // harness 横幅不进记忆库
         if (INJECTION_RE.test(trimmed)) return; // 注入模式文本不捕获（与工具路径同策略）
+        if (agoraEventNoise(trimmed)) return; // agora 事件回执整条跳过（客户端停发，服务端 noise 闸同语义）
         if (trimmed.length < 40) return;
         const st = stateOf(event.sessionID);
         st.chatSeen ??= new Set();
@@ -660,6 +776,22 @@ async function control(ctx: StableCtx, options?: Record<string, unknown>): Promi
             },
             execute: async (input: any) => ({
               content: await postTool("/recall", { query: input.query, limit: input.limit, project: input.project }),
+            }),
+          });
+          editor.add({
+            name: "memory_supersede",
+            description:
+              "退役一条过时记忆：uid 旧条目标记为被 by 新条目取代，检索面此后不再返回旧条（零物理删除，档案可回溯）。⚠ 冲突对照后语义确属互斥才用。",
+            input: {
+              type: "object",
+              properties: {
+                uid: { type: "string", description: "要退役的过时条目 uid" },
+                by: { type: "string", description: "取代它的新条目 uid" },
+              },
+              required: ["uid", "by"],
+            },
+            execute: async (input: any) => ({
+              content: await postTool("/supersede", { uid: input.uid, by: input.by }),
             }),
           });
         });
