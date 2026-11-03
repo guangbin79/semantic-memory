@@ -211,6 +211,7 @@ Service:
 | `MEMORY_TTL_INJECTION_DAYS` | `90` | TTL for injection telemetry; `0` = never expire |
 | `MEMORY_TTL_STALE_DAYS` | `180` | Usage-based retention: `fact`/`artifact` un-recalled this many days are soft-deleted at the next purge (NULL → created_at; `preference`/`decision` exempt); `0` = off |
 | `MEMORY_MAINTENANCE_ON_START` | `1` | Run the maintenance routine at service startup |
+| `MEMORY_NOISE_SWEEP_AT` | `03:30` | Daily local time (`HH:MM`) for the resident noise-sweep thread; invalid values fail service startup |
 | `MEMORY_DEDUP_SIM` | `0.98` | Cosine threshold for vector near-duplicate ingest dedup |
 | `MEMORY_ALLOW_BM25_ONLY` | `0` | Tier-0 escape hatch: `=1` always allows BM25-only startup even when `config.toml` is present |
 
@@ -370,6 +371,7 @@ hook-facing `/recall` `/ingest`, same auth rule: Bearer when `MEMORY_TOKEN` is s
 | `POST /supersede` | Manual retire: body `{"uid","by"}` — mark uid superseded by by, zero physical delete (recall stops returning it) → 200 `{ok,uid,superseded_by}`; 400 missing/unknown `by` or `uid==by`, 404 unknown uid, 409 already deleted/superseded (idempotent, first pointer never overwritten); CLI twin: `semantic-memory supersede <old> --by NEW` |
 | `POST /api/maintenance/purge` | Bulk maintenance (soft-delete purge + TTL + VACUUM) |
 | `POST /api/maintenance/backfill` | Vector backfill for vectorless entries |
+| `POST /api/maintenance/noise_sweep` | Nightly noise sweep (manual trigger): body `{"dry_run": true}` for a zero-write report; deterministic predicate hits are soft-forgotten, weak-signal suspects are only reported |
 
 Bulk-maintenance endpoints sit behind a **double gate**: they return `403`
 unless `MEMORY_TOKEN` is configured (on a default no-token loopback install the

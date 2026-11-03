@@ -18,3 +18,9 @@
 ## 凭据行级硬滤与无裁判直存残留（2026-11-03 825ecc1）
 - strip_noise_lines 已收编 `_is_credential` 行级硬滤——混合条目的蒸馏输入/释义侧凭据行被滤（挂点②③）。
 - 残留（记录未修）：flush_distill_queue 无裁判直存路径（lifecycle.py entry=None 分支）存 `r["content"]` 原文，混合条目凭据行仍逐字落库；滤洗需改直存语义（判重键/原文一致性），超单任务范围留追单。
+
+## 夜扫兜底清扫（2026-11-03 ag-bb3029，99d5e0e..7b868c4）
+- 形态：lifecycle.noise_sweep(dry_run) 全库活条目过确定性谓词→forget 软删（purge 前可逆）；三弱信号齐（[agora] task 前缀＋裸40hex＋状态词）谓词未命中→只进晨报 suspicious 段。调度常驻 daemon 每日定点（缺省 03:30，MEMORY_NOISE_SWEEP_AT），单飞与 flush 同款；端点 POST /api/maintenance/noise_sweep 鉴权与 purge 同款双闸；黑名单规则升级不自动化（过拟合静默误杀走派发评审）。
+- **安全族谓词单一真源（终闸 B/C 收敛 warning 判例）**：凡「按凭据族删除」的条目，其报告摘要省略判定必须复用 noise.py 的 `_is_credential`（全形态含 JSON 引号包装），不得用自有窄正则——两实现漂移曾致引号包装存量凭据原文经晨报落盘 logs/（记忆库外永不清除）。判据：删除谓词与脱敏谓词取并集时，以超集者为准。
+- 软删期间分页扫防跳页：deleted=0 窗口前移量＝本页 forget 数，offset 回退等量补偿；他人并发删除已扫活行仍可滑过单行（天级延迟次日自愈，取舍注释在 lifecycle）。
+- 晨报通道健壮性：daemon 先 log.info 后落盘报告文件（写盘失败报告仍留服务日志）；凭据命中条目摘要置 `[credential elided]` 占位。
