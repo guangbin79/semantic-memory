@@ -614,9 +614,10 @@ def _noise_sweep_daemon(store: MemoryStore, at: str) -> None:
         time.sleep(max(0.0, (_next_sweep_run(hh, mm, now) - now).total_seconds()))
         try:
             report = noise_sweep(store)
+            # 先 log.info 后落盘：写文件失败（目录占用/盘满）报告仍留服务日志；
+            # skipped 让位事件同样留痕（防夜夜让位无观察面）
+            log.info("noise sweep: %s", json.dumps(report, ensure_ascii=False))
             if "skipped" not in report:  # 手动端点在跑则让位
-                # 先 log.info 后落盘：写文件失败（目录占用/盘满）报告仍留服务日志
-                log.info("noise sweep: %s", json.dumps(report, ensure_ascii=False))
                 write_noise_sweep_log(report)
         except Exception:
             log.exception("noise sweep failed")
