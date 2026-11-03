@@ -21,3 +21,7 @@
 
 ## [2026-10-28] ingest | hybrid-recall
 - min_cosine 地板扩展至全部命中（gt-bdffea）：BM25 词面证据只影响排序不再豁免门限；混合场景无向量条目必出局（backfill 待做）；纯 BM25 回退（cos_map 空）时门限 fail-open 不生效——有意取舍，已知缺口
+
+## [2026-11-03] ingest | noise
+- 凭据硬拒正则加固清单（IGNORECASE/引号包装/pypi 子串锚/token 合成串）＋回显族行级纯路径判别（B 册误杀实证）＋无裁判直存残留记录
+- Types: Decision/Strategy/Bug
