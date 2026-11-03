@@ -3,7 +3,8 @@
 三层污染路共用同一判定核（raw hook 直写 / 显式 memory_store / 蒸馏对
 transcript 事件行再创作）：先剥标识 token（哈希/session/task id/路径）与
 门禁样板子串，残余对照词表。宁漏勿误——任何一行含词表外正文即放行整条
-（误杀知识不可逆），故整条判噪声还须叠加长度与状态关键词双条件。
+（误杀知识不可逆），故整条判噪声还须叠加长度与状态关键词双条件；唯凭据
+与派发页回显两族独立硬短路（安全优先，见 is_task_event_noise）。
 挂点：rest_ingest 入口丢弃；flush_distill_queue 行丢弃、蒸馏输入滤洗、
 typed 释义丢弃（详见 server.py / lifecycle.py）。
 """
@@ -29,6 +30,15 @@ _BOILERPLATE = (
     "environment recovered",
     "Merged commit",
 )
+
+# 凭据硬拒（安全优先宁滥勿漏，独立短路；IGNORECASE 防 TOKEN: 变体、
+# ["']? 防 JSON 引号包装；无裁判直存路径残留见评审 A-W1）
+_CREDENTIAL_TOKEN = re.compile(
+    r"[\"']?token[\"']?\s*[:：]\s*[\"']?[0-9a-zA-Z_\-]{40,}", re.IGNORECASE)
+# 派发页回显行：BOOT 三件套的 page:/env: 纯路径行——行级精确判，「正文
+# 同行提及 page:/env:」的知识附言不误杀（终闸 B 册实证）
+_ECHO_PAGE = re.compile(r"^page:\s*\S+\s*$")
+_ECHO_ENV = re.compile(r"^env:\s*\S+\s*$")
 
 _CJK_VOCAB = set(
     "任务已完成关闭提交的哈希为其分别和评审环锚设置状态取取消环境回收"
@@ -81,12 +91,29 @@ def _is_noise_line(line: str) -> bool:
     return _PLAIN.match(residual) is not None and _tokens_ok(residual)
 
 
-def is_task_event_noise(content: str) -> bool:
-    """整条判定：≤400 字符且非空行全为噪声行且命中任务状态关键词。
+def _is_credential(content: str) -> bool:
+    """凭据行/条判定：agora 临时牌、pypi 令牌、token: 后 ≥40 位串。"""
+    return ("[agora] credential" in content
+            or "pypi-AgEI" in content
+            or _CREDENTIAL_TOKEN.search(content) is not None)
 
-    三条件缺一不可：词表放行了太多正常英文短句，状态关键词是最后一道
-    「这确实是任务回执」的证据门。
+
+def is_task_event_noise(content: str) -> bool:
+    """整条判定：凭据/派发页回显两族硬短路；其余 ≤400 字符且非空行全为
+    噪声行且命中任务状态关键词。
+
+    凭据族安全优先，不受长度与状态关键词前置条件限制。派发页回显族
+    （"[agora]" 开头＋page:/env: 纯路径行＋<500 字符）为 BOOT/任务页
+    三件套回显。三条件缺一不可：词表放行了太多正常英文短句，状态关键词
+    是最后一道「这确实是任务回执」的证据门。
     """
+    if _is_credential(content):
+        return True
+    if content.startswith("[agora]") and len(content) < 500:
+        lines = [ln.strip() for ln in content.split("\n")]
+        if (any(_ECHO_PAGE.match(ln) for ln in lines)
+                and any(_ECHO_ENV.match(ln) for ln in lines)):
+            return True
     if len(content) > 400 or not content.strip():
         return False
     if not all(_is_noise_line(ln) for ln in content.split("\n")):
@@ -95,6 +122,7 @@ def is_task_event_noise(content: str) -> bool:
 
 
 def strip_noise_lines(content: str) -> str:
-    """逐行滤除噪声行，其余按原序 \\n 连接（混合内容的蒸馏输入滤洗）。"""
+    """逐行滤除噪声行与凭据行（凭据硬拒的行级投影，护蒸馏输入/释义侧），
+    其余按原序 \\n 连接。"""
     return "\n".join(ln for ln in content.split("\n")
-                     if not _is_noise_line(ln))
+                     if not _is_noise_line(ln) and not _is_credential(ln))

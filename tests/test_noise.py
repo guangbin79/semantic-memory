@@ -28,6 +28,27 @@ NOISE_SAMPLES = [
     # 门禁样板剥除路径
     "任务 ag-22c3b1 已 done；non-ff 拒并：目标分支已推进——同步主干后重新 "
     "post(done, commit)",
+    # 凭据硬拒：worker 临时牌泄漏形态（2026-11 hotmem 35 条；token 系形态
+    # 合成串——真值不入 git 史，终闸 C 册密钥卫生）
+    "[agora] credential ag-76ad62\n"
+    "token: 5b8b071a0123456789abcdef0123456789abcdef0123456789abcdef5f6a9c0d",
+    # 凭据硬拒：pypi 令牌串
+    "pypi-AgEIcHlwaS5vcmcAOgAKABBfdG9rZW4",
+    # 凭据硬拒变体（终闸 C 册实证 bypass 钉）：大写＋全角冒号
+    "TOKEN：0123456789abcdef0123456789abcdef0123456789abcdef0123",
+    # 凭据硬拒变体：.pypirc 落盘形态（非串首）与 JSON 引号包装
+    "password = pypi-AgEIcHlwaS5vcmcAOgAKABBfdG9rZW4",
+    '{"token": "0123456789abcdef0123456789abcdef0123456789abcdef0123"}',
+    # 凭据硬拒不受 400 字符前置限制（独立短路性质钉）
+    "token: " + "a" * 64 + "\n背景" + "很长" * 300,
+    # 派发页回显族：BOOT 三件套（page:/env: 纯路径行）
+    "[agora] ag-30f5a5: noise.py 补凭据硬拒＋派发页回显族＋测试\n"
+    "page: /home/guangbin/plaza/wiki/tasks/ag-30f5a5.md\n"
+    "env: /home/guangbin/semantic-memory__wt-ag-30f5a5__11031121pean\n"
+    "contract: 只在 env 内工作；结论经 post(done) 回填，body=完整 commit sha",
+    # agorad 结果回执族（理论已覆盖，显式钉防回归）
+    "[agora] task ag-76ad62 result from agorad\n"
+    "任务 ag-76ad62 已 closed；commit=356c6c3b040d66e3a383a81336930c94b8361efa",
 ]
 
 KEEP_SAMPLES = [
@@ -43,6 +64,12 @@ KEEP_SAMPLES = [
     "task done merged " * 40,
     # 裸英文 fixture 词：字符集命中但词表外 → 不判噪声（误杀回归钉）
     "raw-a",
+    # 凭据硬拒反向钉：含 "token" 一词的正常知识笔记不误杀
+    "F43 教训：凭据 token 不进上下文",
+    # 回显族行级精确判反向钉（终闸 B 册实证串）：正文同行「提及」
+    # page:/env: 的知识附言不误杀
+    "[agora] task ag-1 note from ses_y\n"
+    "部署看板见 page: docs/deploy.md，env: staging 的根因分析是证书过期",
 ]
 
 
@@ -66,6 +93,22 @@ def test_strip_keeps_knowledge_lines():
     assert strip_noise_lines("task ag-x done from ses_y\n保留的知识") == "保留的知识"
     assert strip_noise_lines("verify 失败——修复后重新 post(done, commit)\n真知识") == "真知识"
     assert strip_noise_lines("无噪声") == "无噪声"
+
+
+def test_strip_drops_credential_lines_keeps_knowledge():
+    """A-W1 钉：凭据硬拒行级投影——混合条目滤洗后不含凭据行。"""
+    cred = "[agora] credential ag-x\ntoken: " + "a" * 64
+    assert strip_noise_lines(cred + "\n真实知识") == "真实知识"
+    assert strip_noise_lines("password = pypi-AgEIabc\n知识B") == "知识B"
+
+
+def test_flush_distill_input_drops_credential_line(store):
+    """A-W1 钉（挂点②）：混合条目蒸馏输入不含凭据行，token 不进裁判上下文。"""
+    captured = []
+    entry = {"content": "真实知识", "kind": "fact", "scope": "project", "tags": []}
+    enqueue_raw(store, "token: " + "a" * 64 + "\n真实知识", "chat", "p")
+    flush_distill_queue(store, _StubDistiller([entry], captured))
+    assert captured == ["真实知识"]
 
 
 class _StubDistiller:
